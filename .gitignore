@@ -1,5 +1,6 @@
-.vscode/
+*vscode/
 .clang-format
 *.o
 *.a
 *.so
+.gitignore
