@@ -1,6 +1,8 @@
 #ifndef API_H__VFH5Y
 #define API_H__VFH5Y
 
+#include <tunsocket.h>
+
 extern int tcpRMax;
 extern int tcpWMax;
 extern ts_data_t *tcpHead;

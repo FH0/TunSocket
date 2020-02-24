@@ -1,6 +1,8 @@
 #ifndef TCP_H__VFH5Y
 #define TCP_H__VFH5Y
 
+#include <tunsocket.h>
+
 void tcp_write(ts_data_t *data);
 void handle_tcp(uint16_t flag, char *buf, int bufLen);
 

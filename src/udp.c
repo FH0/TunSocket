@@ -1,7 +1,6 @@
 #include "udp.h"
 #include "event.h"
 #include "misc.h"
-#include <tunsocket.h>
 
 void ts_udp_write(char flag, void *sip, uint16_t sport, void *dip,
                   uint16_t dport, void *buf, int bufLen) {

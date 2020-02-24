@@ -1,5 +1,4 @@
 #include "misc.h"
-#include <tunsocket.h>
 
 /* copy form internet :) */
 uint16_t calculate_checksum(uint16_t *ptr, int ptrLen) {

@@ -2,7 +2,6 @@
 #include "misc.h"
 #include "tcp.h"
 #include "udp.h"
-#include <tunsocket.h>
 
 static char *unixPath = NULL;
 static char *tunPath = "/dev/net/tun";

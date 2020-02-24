@@ -1,7 +1,6 @@
 #include "tcp.h"
 #include "event.h"
 #include "misc.h"
-#include <tunsocket.h>
 
 static void handle_tcp_ack(ts_data_t *data, char flag);
 
