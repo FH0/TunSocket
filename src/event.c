@@ -18,12 +18,6 @@ int tunMtu = 65535;
 
 void (*ts_cb)(ts_data_t *data);
 
-inline void *ts_malloc(int len) {
-    void *ptr = calloc(len, 1);
-    ASSERT(ptr != NULL);
-    return (void *)ptr;
-}
-
 void ts_set(int flag, ...) {
     va_list ap;
 
@@ -203,7 +197,7 @@ void ts_run(void (*ts_cb_tmp)(ts_data_t *data)) {
         if (tcpET == 0) {
             /* handle tcp queue */
             for (tmp = tcpHead->tcp.next; tmp; tmp = tmp->tcp.next) {
-                if ((!(tmp->tcp.status & 0x20)) &&
+                if ((!(tmp->tcp.status & 0x22)) &&
                     ((tmp->tcp.status & 0x80) || (tmp->tcp.rBufLen > 0))) {
                     ts_cb(tmp);
                 }

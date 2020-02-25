@@ -12,10 +12,10 @@ clean:
 	-rm -f $(depend) libtunsocket.a udp_test tcp_test et_test
 
 udp_test: clean libtunsocket.a
-	$(CC) $(CFLAGS) -o udp_test test/udp_test.c libtunsocket.a
+	$(CC) $(CFLAGS) -g -ggdb -o udp_test test/udp_test.c libtunsocket.a
 
 tcp_test: clean libtunsocket.a
-	$(CC) $(CFLAGS) -o tcp_test test/tcp_test.c libtunsocket.a
+	$(CC) $(CFLAGS) -g -ggdb -o tcp_test test/tcp_test.c libtunsocket.a
 
 et_test: clean libtunsocket.a
-	$(CC) $(CFLAGS) -o et_test test/et_test.c libtunsocket.a
+	$(CC) $(CFLAGS) -g -ggdb -o et_test test/et_test.c libtunsocket.a -lpthread

@@ -1,21 +1,27 @@
 #include "misc.h"
 
+inline void *ts_malloc(int len) {
+    void *ptr = calloc(len, 1);
+    ASSERT(ptr != NULL);
+    return (void *)ptr;
+}
+
 /* copy form internet :) */
-uint16_t calculate_checksum(uint16_t *ptr, int ptrLen) {
-    int sum = 0;
-    while (ptrLen > 1) {
-        sum += *ptr++;
-        ptrLen -= 2;
-    }
-    if (ptrLen == 1) {
-        char tmp[2];
-        tmp[0] = *(char *)ptr;
-        tmp[1] = 0;
-        sum += *(char *)tmp;
-    }
-    while (sum >> 16) {
-        sum = (sum >> 16) + (sum & 0xffff);
+uint16_t calculate_checksum(uint16_t *buf, int len) {
+    long sum = 0;
+
+    while (len > 1) {
+        sum += *buf++;
+        if (sum & 0x80000000)
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        len -= 2;
     }
 
-    return (uint16_t)~sum;
+    if (len)
+        sum += (uint16_t) * (uint8_t *)buf;
+
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+
+    return ~sum;
 }

@@ -62,8 +62,7 @@ void ts_udp_write(char flag, void *sip, uint16_t sport, void *dip,
                                         36 + bufTmpLen - iphdrLen);
     }
 
-    if (write(tunFd, bufTmp, bufTmpLen))
-        ; /* make compile happy */
+    SILENT(write(tunFd, bufTmp, bufTmpLen));
 }
 
 void handle_udp(char flag, ts_data_t *data, char *buf, int bufLen) {

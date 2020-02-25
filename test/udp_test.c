@@ -1,16 +1,15 @@
-#include <tunsocket.h>
-#include <signal.h>
 #include <pthread.h>
+#include <signal.h>
+#include <tunsocket.h>
 
-#define ASSERT(expr)                                              \
-    do {                                                          \
-        if (!(expr)) {                                            \
-            fprintf(stderr,                                       \
-                    "Assertion failed in %s on line %d: %s\n",    \
-                    __FILE__, __LINE__, #expr);                   \
-            perror("");                                           \
-            abort();                                              \
-        }                                                         \
+#define ASSERT(expr)                                                           \
+    do {                                                                       \
+        if (!(expr)) {                                                         \
+            fprintf(stderr, "Assertion failed in %s on line %d: %s\n",         \
+                    __FILE__, __LINE__, #expr);                                \
+            perror("");                                                        \
+            abort();                                                           \
+        }                                                                      \
     } while (0)
 
 void udp_cb(ts_data_t *data) {
@@ -28,7 +27,8 @@ void udp_cb(ts_data_t *data) {
         /* print something */
         inet_ntop(AF_INET, data->udp.sip, saddr, sockLen);
         inet_ntop(AF_INET, data->udp.dip, daddr, sockLen);
-        printf("ipv4 udp %s:%d -> %s:%d \n", saddr, ntohs(data->udp.sport), daddr, ntohs(data->udp.dport));
+        printf("ipv4 udp %s:%d -> %s:%d \n", saddr, ntohs(data->udp.sport),
+               daddr, ntohs(data->udp.dport));
 
         memset(&sendAddr, 0, sockLen);
         sendAddr.sin_family = AF_INET;
@@ -38,13 +38,15 @@ void udp_cb(ts_data_t *data) {
         udpFd = socket(AF_INET, SOCK_DGRAM, 0);
         ASSERT(-1 != udpFd);
 
-        sendto(udpFd, data->udp.buf, data->udp.bufLen, 0, (struct sockaddr *)&sendAddr, sockLen);
-        nread = recvfrom(udpFd, buf, 65535, 0, (struct sockaddr *)&sendAddr, &sockLen);
+        sendto(udpFd, data->udp.buf, data->udp.bufLen, 0,
+               (struct sockaddr *)&sendAddr, sockLen);
+        nread = recvfrom(udpFd, buf, 65535, 0, (struct sockaddr *)&sendAddr,
+                         &sockLen);
 
-        ts_udp_write(TS_UDP, data->udp.dip, data->udp.dport, data->udp.sip, data->udp.sport, buf, nread);
+        ts_udp_write(TS_UDP, data->udp.dip, data->udp.dport, data->udp.sip,
+                     data->udp.sport, buf, nread);
         close(udpFd);
-    }
-    else if (TS6_UDP == data->type) {
+    } else if (TS6_UDP == data->type) {
         char buf[65535];
         char saddr[40];
         char daddr[40];
@@ -58,7 +60,8 @@ void udp_cb(ts_data_t *data) {
         /* print something */
         inet_ntop(AF_INET6, data->udp.sip, saddr, 40);
         inet_ntop(AF_INET6, data->udp.dip, daddr, 40);
-        printf("ipv6 udp %s:%d -> %s:%d \n", saddr, ntohs(data->udp.sport), daddr, ntohs(data->udp.dport));
+        printf("ipv6 udp %s:%d -> %s:%d \n", saddr, ntohs(data->udp.sport),
+               daddr, ntohs(data->udp.dport));
 
         memset(&sendAddr, 0, sockLen);
         sendAddr.sin6_family = AF_INET6;
@@ -68,10 +71,13 @@ void udp_cb(ts_data_t *data) {
         udpFd = socket(AF_INET6, SOCK_DGRAM, 0);
         ASSERT(-1 != udpFd);
 
-        sendto(udpFd, data->udp.buf, data->udp.bufLen, 0, (struct sockaddr *)&sendAddr, sockLen);
-        nread = recvfrom(udpFd, buf, 65535, 0, (struct sockaddr *)&sendAddr, &sockLen);
+        sendto(udpFd, data->udp.buf, data->udp.bufLen, 0,
+               (struct sockaddr *)&sendAddr, sockLen);
+        nread = recvfrom(udpFd, buf, 65535, 0, (struct sockaddr *)&sendAddr,
+                         &sockLen);
 
-        ts_udp_write(TS6_UDP, data->udp.dip, data->udp.dport, data->udp.sip, data->udp.sport, buf, nread);
+        ts_udp_write(TS6_UDP, data->udp.dip, data->udp.dport, data->udp.sip,
+                     data->udp.sport, buf, nread);
         close(udpFd);
     }
 }
@@ -82,7 +88,7 @@ int main() {
     // ts_set(TS_TUN_PATH, "/dev/tun");
 
     ts_init();
-    
+
     ts_run(udp_cb);
 
     return 0;

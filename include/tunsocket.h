@@ -55,6 +55,7 @@ typedef struct ts_data {
         struct {
             char status;
             uint16_t window;
+            uint16_t mss;
             char sip[16];
             char dip[16];
             uint16_t sport;
@@ -96,6 +97,7 @@ void ts_run(void (*ts_cb)(ts_data_t *data));
 int ts_tcp_read(ts_data_t *data, char *buf, int bufLen);
 int ts_tcp_write(ts_data_t *data, char *buf, int bufLen);
 void ts_tcp_close(ts_data_t *data);
+void ts_tcp_shutdown(ts_data_t *data);
 void ts_udp_write(char flag, void *sip, uint16_t sport, void *dip,
                   uint16_t dport, void *buf, int bufLen);
 
