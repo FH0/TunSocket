@@ -24,6 +24,7 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 enum {
     TS_MTU = 1,
@@ -64,6 +65,10 @@ typedef struct ts_data {
             char *wBuf;
             int rBufLen;
             int wBufLen;
+            int rBufPointer; /* ring buffer */
+            int wBufPointer; /* ring buffer */
+            pthread_mutex_t rLock; /* thread safe */
+            pthread_mutex_t wLock; /* thread safe */
             int ack;
             int seq;
             struct ts_data *next;

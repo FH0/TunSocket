@@ -15,5 +15,6 @@
 #define SILENT(ptr) (void)((ptr) + 1);
 
 uint16_t calculate_checksum(uint16_t *ptr, int ptrLen);
+void hex_dump(char *ptr, int ptrLen);
 
 #endif /* MISC_H__VFH5Y */

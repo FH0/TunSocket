@@ -1,6 +1,5 @@
 #include <errno.h>
 #include <linux/sockios.h>
-#include <pthread.h>
 #include <signal.h>
 #include <tunsocket.h>
 
@@ -72,7 +71,7 @@ void tcp_cb(ts_data_t *data) {
         /* print something */
         inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
         inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
-                    printf("%-10s %-16s -> %-16s \n", "connect", saddr, daddr);
+        printf("%-10s %-16s -> %-16s \n", "connect", saddr, daddr);
 
         pData->fd = socket(AF_INET, SOCK_STREAM, 0);
         ASSERT(-1 != pData->fd);
@@ -99,7 +98,7 @@ void tcp_cb(ts_data_t *data) {
 
         if (data->tcp.rBufLen <= 0) {
             if ((tcp_status(pData->fd)) == TCP_CLOSE_WAIT) {
-                printf("%-10s %-16s -> %-16s \n", "close", saddr, daddr);
+                printf("%-10s %-16s -> %-16s \n", "close", daddr, saddr);
                 epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
                           (struct epoll_event *)NULL);
                 close(pData->fd);
@@ -206,7 +205,7 @@ void tcp_cb(ts_data_t *data) {
             } else {
                 shutdown(pData->fd, 1); /* close write stream */
             }
-            printf("%-10s %-16s -> %-16s \n", "close", saddr, daddr);
+                printf("%-10s %-16s -> %-16s \n", "close", daddr, saddr);
         } else if (data->tcp.status & 0x10) {
             printf("%-10s %-16s -> %-16s \n", "error", saddr, daddr);
             epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
@@ -280,6 +279,8 @@ void thread2_cb(void *arg) {
                 char saddr[16];
                 char daddr[16];
 
+                if (data == NULL)
+                    puts("NULL");
                 inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
                 inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
 
@@ -311,7 +312,6 @@ void thread2_cb(void *arg) {
                     printf("%-10s %-16s -> %-16s \n", "payload", daddr, saddr);
 
                     int recvUsed = socket_recv_used(pData->fd);
-                    printf("%srecvUsed %d%s\n", "\033[36m", recvUsed, "\033[0m");
                     int wBufLeft = tcpWMax - data->tcp.wBufLen;
                     int n = (wBufLeft > recvUsed)
                                 ? recvUsed

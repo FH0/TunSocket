@@ -3,7 +3,8 @@
         "event.h": "c",
         "tunsocket.h": "c",
         "tcp.h": "c",
-        "misc.h": "c"
+        "misc.h": "c",
+        "unistd.h": "c"
     },
     "C_Cpp.errorSquiggles": "Disabled"
 }
