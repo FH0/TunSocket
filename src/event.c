@@ -9,7 +9,6 @@ static char *tunName = "tun3";
 static char *tunAddr = "10.5.5.5";
 static char *tunAddr6 = "fd00::5";
 
-int tcpET = 0;
 int tcpRMax = 192 * 1024;
 int tcpWMax = 192 * 1024;
 ts_data_t *tcpHead;
@@ -38,8 +37,6 @@ void ts_set(int flag, ...) {
         tunAddr = va_arg(ap, char *);
     } else if (flag == TS_ADDR6) {
         tunAddr6 = va_arg(ap, char *);
-    } else if (flag == TS_TCP_ET) {
-        tcpET = 1;
     } else {
         ASSERT(0 && "flag not support");
     }
@@ -150,19 +147,16 @@ void ts_run(void (*ts_cb_tmp)(ts_data_t *data)) {
     ts_cb = ts_cb_tmp;
 
     /* set non-blocking if tcpET = 0*/
-    if (tcpET == 0) {
-        ASSERT(-1 !=
-               (fcntl(tunFd, F_SETFL, fcntl(tunFd, F_GETFL) | O_NONBLOCK)));
-    }
+    ASSERT(-1 != (fcntl(tunFd, F_SETFL, fcntl(tunFd, F_GETFL) | O_NONBLOCK)));
 
     int bufLen;
     ts_data_t *tmp;
     for (;;) {
-        bufLen = read(tunFd, buf, tunMtu); /* tunMtu as buffer size */
+        bufLen =
+            ts_timeout_read(tunFd, buf, tunMtu, 10); /* tunMtu as buffer size */
 
         /* handle data from tun */
-        if (bufLen > 20) /* less equal than 20 make no sense */
-        {
+        if (bufLen > 20) {
             if ((buf[0] >> 4) == 4) {
                 if (buf[9] == 6) {
                     handle_tcp(4, buf, bufLen);
@@ -191,17 +185,11 @@ void ts_run(void (*ts_cb_tmp)(ts_data_t *data)) {
 
                     ts_cb(data);
                 }
-            } /* only ipv4 and ipv6 are supported */
+            } /* only  support ipv4 and ipv6 */
         }
 
-        if (tcpET == 0) {
-            /* handle tcp queue */
-            for (tmp = tcpHead->tcp.next; tmp; tmp = tmp->tcp.next) {
-                if ((!(tmp->tcp.status & 0x22)) &&
-                    ((tmp->tcp.status & 0x80) || (tmp->tcp.rBufLen > 0))) {
-                    ts_cb(tmp);
-                }
-            }
-        }
+        /* Out of order timeout */ /* ack timeout */ /* Detection window */
+        for (tmp = tcpHead->tcp.next; tmp; tmp = tmp->tcp.next)
+            handle_tcp_queue(tmp);
     }
 }

@@ -17,24 +17,44 @@
 int socket_send_left(int sockFd) {
     socklen_t intLen = sizeof(int);
     int sendMax, sendUsed;
-    ASSERT(-1 !=
-           (getsockopt(sockFd, SOL_SOCKET, SO_SNDBUF, &sendMax, &intLen)));
+    getsockopt(sockFd, SOL_SOCKET, SO_SNDBUF, &sendMax, &intLen);
     sendMax = sendMax / 2; /* linux cause this */
-    ASSERT(-1 != (ioctl(sockFd, SIOCOUTQ, &sendUsed)));
+    ioctl(sockFd, SIOCOUTQ, &sendUsed);
     return sendMax - sendUsed;
 }
 
 int socket_recv_used(int sockFd) {
     int recvUsed;
-    ASSERT(-1 != (ioctl(sockFd, SIOCINQ, &recvUsed)));
+    ioctl(sockFd, SIOCINQ, &recvUsed);
     return recvUsed;
 }
 
 int tcp_status(int sockFd) {
     struct tcp_info info;
     socklen_t len = sizeof(info);
-    ASSERT(-1 != (getsockopt(sockFd, IPPROTO_TCP, TCP_INFO, &info, &len)));
+    getsockopt(sockFd, IPPROTO_TCP, TCP_INFO, &info, &len);
     return info.tcpi_state;
+}
+
+void pinfo(char *hdr, char *ip1, char *ip2) {
+    char addr1[16];
+    char addr2[16];
+
+    char *color;
+    if (!(strcmp(hdr, "connect")))
+        color = "\033[32m"; /* green */
+    else if (!(strcmp(hdr, "payload")))
+        color = "\033[33m"; /* yellow */
+    else if (!(strcmp(hdr, "shutdown")))
+        color = "\033[0m"; /* white */
+    else if (!(strcmp(hdr, "close")))
+        color = "\033[31m"; /* red */
+    else if (!(strcmp(hdr, "error")))
+        color = "\033[31m"; /* red */
+
+    inet_ntop(AF_INET, ip1, addr1, 16);
+    inet_ntop(AF_INET, ip2, addr2, 16);
+    printf("%s%-10s\033[0m %-16s -> %-16s \n", color, hdr, addr1, addr2);
 }
 
 typedef struct {
@@ -61,17 +81,9 @@ void tcp_cb(ts_data_t *data) {
     if (data->type == TS_CONNECT) {
         struct sockaddr_in sendAddr;
         epoll_ptr_t *pData = ts_malloc(sizeof(epoll_ptr_t));
+        socklen_t sockLen = sizeof(struct sockaddr_in);
 
-        char saddr[16];
-        char daddr[16];
-        socklen_t sockLen;
-
-        sockLen = sizeof(struct sockaddr_in);
-
-        /* print something */
-        inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
-        inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
-        printf("%-10s %-16s -> %-16s \n", "connect", saddr, daddr);
+        pinfo("connect", data->tcp.sip, data->tcp.dip);
 
         pData->fd = socket(AF_INET, SOCK_STREAM, 0);
         ASSERT(-1 != pData->fd);
@@ -90,36 +102,31 @@ void tcp_cb(ts_data_t *data) {
         data->tcp.ptr = pData;
     } else if (data->type == TS_RABLE) {
         epoll_ptr_t *pData = (epoll_ptr_t *)data->tcp.ptr;
-        char saddr[16];
-        char daddr[16];
 
-        inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
-        inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
-
-        if (data->tcp.rBufLen <= 0) {
+        if (data->tcp.status & 0x11) {
+            pinfo("error", data->tcp.sip, data->tcp.dip);
+            epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
+                      (struct epoll_event *)NULL);
+            close(pData->fd);
+            ts_tcp_close(data);
+            ts_free(data->tcp.ptr);
+        } else if (data->tcp.rBufLen <= 0) {
             if ((tcp_status(pData->fd)) == TCP_CLOSE_WAIT) {
-                printf("%-10s %-16s -> %-16s \n", "close", daddr, saddr);
+                pinfo("close", data->tcp.dip, data->tcp.sip);
                 epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
                           (struct epoll_event *)NULL);
                 close(pData->fd);
                 ts_tcp_close(data);
                 ts_free(pData);
             } else {
-                printf("%-10s %-16s -> %-16s \n", "shutdown", saddr, daddr);
+                pinfo("shutdown", data->tcp.sip, data->tcp.dip);
                 shutdown(pData->fd, 1); /* close write stream */
             }
-        } else if (data->tcp.status & 0x10) {
-            printf("%-10s %-16s -> %-16s \n", "error", saddr, daddr);
-            epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
-                      (struct epoll_event *)NULL);
-            close(pData->fd);
-            ts_tcp_close(data);
-            ts_free(data->tcp.ptr);
         } else {
             if ((tcp_status(pData->fd)) == TCP_SYN_SENT) {
                 return;
             }
-            printf("%-10s %-16s -> %-16s \n", "payload", saddr, daddr);
+            pinfo("payload", data->tcp.sip, data->tcp.dip);
             int sendLeft = socket_send_left(pData->fd);
             if (sendLeft > 0) {
                 int n = (sendLeft > data->tcp.rBufLen)
@@ -136,115 +143,10 @@ void tcp_cb(ts_data_t *data) {
     } else if (data->type == TS_WABLE) {
         epoll_ptr_t *pData = (epoll_ptr_t *)data->tcp.ptr;
         int recvUsed = socket_recv_used(pData->fd);
-        if (recvUsed <= 0) {
+        if (recvUsed <= 0)
             return;
-        }
 
-        char saddr[16];
-        char daddr[16];
-
-        inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
-        inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
-
-        printf("%-10s %-16s -> %-16s \n", "payload", daddr, saddr);
-
-        int wBufLeft = tcpWMax - data->tcp.wBufLen;
-        int n = (wBufLeft > recvUsed)
-                    ? recvUsed
-                    : wBufLeft; /* how much data need to handle */
-        char tmp[n];
-        SILENT(read(pData->fd, tmp, n));
-        ts_tcp_write(data, tmp, n);
-        if (wBufLeft <= recvUsed) {
-            ts_tcp_write(data, "1", 1); /* make it EAGAIN */
-        }
-    } else if (data->type == TS6_CONNECT) {
-        struct sockaddr_in6 sendAddr;
-        epoll_ptr_t *pData = ts_malloc(sizeof(epoll_ptr_t));
-
-        char saddr[40];
-        char daddr[40];
-        socklen_t sockLen;
-
-        sockLen = sizeof(struct sockaddr_in6);
-
-        /* print something */
-        inet_ntop(AF_INET6, data->tcp.sip, saddr, 40);
-        inet_ntop(AF_INET6, data->tcp.dip, daddr, 40);
-        printf("%-10s %-16s -> %-16s \n", "connect", saddr, daddr);
-
-        pData->fd = socket(AF_INET6, SOCK_STREAM, 0);
-        ASSERT(-1 != pData->fd);
-        pData->data = data;
-        epoll_add_fd(pData);
-
-        memset(&sendAddr, 0, sockLen);
-        sendAddr.sin6_family = AF_INET6;
-        sendAddr.sin6_port = data->tcp.dport;
-        memcpy(&sendAddr.sin6_addr.s6_addr, data->tcp.dip, 16);
-
-        ASSERT(-1 !=
-               (connect(pData->fd, (struct sockaddr *)&sendAddr, sockLen)));
-
-        data->tcp.ptr = pData;
-    } else if (data->type == TS6_RABLE) {
-        epoll_ptr_t *pData = (epoll_ptr_t *)data->tcp.ptr;
-        char saddr[40];
-        char daddr[40];
-
-        inet_ntop(AF_INET6, data->tcp.sip, saddr, 40);
-        inet_ntop(AF_INET6, data->tcp.dip, daddr, 40);
-
-        if (data->tcp.rBufLen <= 0) {
-            if ((tcp_status(pData->fd)) == TCP_CLOSE_WAIT) {
-                epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
-                          (struct epoll_event *)NULL);
-                close(pData->fd);
-                ts_tcp_close(data);
-                ts_free(pData);
-            } else {
-                shutdown(pData->fd, 1); /* close write stream */
-            }
-                printf("%-10s %-16s -> %-16s \n", "close", daddr, saddr);
-        } else if (data->tcp.status & 0x10) {
-            printf("%-10s %-16s -> %-16s \n", "error", saddr, daddr);
-            epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
-                      (struct epoll_event *)NULL);
-            close(pData->fd);
-            ts_tcp_close(data);
-            ts_free(data->tcp.ptr);
-        } else {
-            if ((tcp_status(pData->fd)) == TCP_SYN_SENT) {
-                return;
-            }
-            printf("%-10s %-16s -> %-16s \n", "payload", saddr, daddr);
-            int sendLeft = socket_send_left(pData->fd);
-            if (sendLeft > 0) {
-                int n = (sendLeft > data->tcp.rBufLen)
-                            ? data->tcp.rBufLen
-                            : sendLeft; /* how much data need to handle */
-                char tmp[n];
-                ts_tcp_read(data, tmp, n);
-                SILENT(write(pData->fd, tmp, n));
-                if (sendLeft <= data->tcp.rBufLen) { /* make it EAGAIN */
-                    SILENT(write(pData->fd, "1", 1));
-                }
-            }
-        }
-    } else if (data->type == TS6_WABLE) {
-        epoll_ptr_t *pData = (epoll_ptr_t *)data->tcp.ptr;
-        int recvUsed = socket_recv_used(pData->fd);
-        if ((socket_recv_used(((epoll_ptr_t *)data->tcp.ptr)->fd)) <= 0) {
-            return;
-        }
-
-        char saddr[40];
-        char daddr[40];
-
-        inet_ntop(AF_INET, data->tcp.sip, saddr, 40);
-        inet_ntop(AF_INET, data->tcp.dip, daddr, 40);
-
-        printf("%-10s %-16s -> %-16s \n", "payload", daddr, saddr);
+        pinfo("payload", data->tcp.dip, data->tcp.sip);
 
         int wBufLeft = tcpWMax - data->tcp.wBufLen;
         int n = (wBufLeft > recvUsed)
@@ -260,7 +162,6 @@ void tcp_cb(ts_data_t *data) {
 }
 
 void thread1_cb(void *arg) {
-    ts_set(TS_TCP_ET);
     ts_init();
     ts_run(tcp_cb);
 }
@@ -268,21 +169,17 @@ void thread1_cb(void *arg) {
 void thread2_cb(void *arg) {
     struct epoll_event events[512];
 
+    int i, number;
     for (;;) {
-        int number = epoll_wait(epollFd, events, 512, -1);
+        number = epoll_wait(epollFd, events, 512, -1);
         ASSERT(-1 != number);
 
-        for (int i = 0; i < number; i++) {
+        for (i = 0; i < number; i++) {
             epoll_ptr_t *pData = (epoll_ptr_t *)events[i].data.ptr;
             ts_data_t *data = pData->data;
             if (events[i].events & EPOLLIN) {
-                char saddr[16];
-                char daddr[16];
-
                 if (data == NULL)
                     puts("NULL");
-                inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
-                inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
 
                 int recvUsed = socket_recv_used(pData->fd);
                 if (recvUsed == 0) {
@@ -292,11 +189,12 @@ void thread2_cb(void *arg) {
                     if (info.tcpi_state == TCP_ESTABLISHED) {
                         break; /* EAGAIN */
                     }
-                    printf("%-10s %-16s -> %-16s \n", "close", saddr, daddr);
                     if ((info.tcpi_state == TCP_CLOSE_WAIT) &&
                         (!(data->tcp.status & 0x80))) {
                         ts_tcp_shutdown(data);
+                        pinfo("shutdown", data->tcp.dip, data->tcp.sip);
                     } else {
+                        pinfo("close", data->tcp.sip, data->tcp.dip);
                         ts_tcp_close(data);
                         epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
                                   (struct epoll_event *)NULL);
@@ -305,11 +203,10 @@ void thread2_cb(void *arg) {
                     }
                     break;
                 } else {
-                    if (data->tcp.wBufLen >= tcpWMax) {
+                    if (data->tcp.wBufLen >= tcpWMax)
                         break;
-                    }
 
-                    printf("%-10s %-16s -> %-16s \n", "payload", daddr, saddr);
+                    pinfo("payload", data->tcp.dip, data->tcp.sip);
 
                     int recvUsed = socket_recv_used(pData->fd);
                     int wBufLeft = tcpWMax - data->tcp.wBufLen;
@@ -321,20 +218,13 @@ void thread2_cb(void *arg) {
                     SILENT(read(pData->fd, tmp, n));
 
                     ts_tcp_write(data, tmp, n);
-                    if (wBufLeft <= recvUsed) {
+                    if (wBufLeft <= recvUsed)
                         ts_tcp_write(data, "1", 1); /* make it EAGAIN */
-                    }
                 }
             } else if (events[i].events & EPOLLOUT) {
-                char saddr[16];
-                char daddr[16];
-
-                inet_ntop(AF_INET, data->tcp.sip, saddr, 16);
-                inet_ntop(AF_INET, data->tcp.dip, daddr, 16);
-
                 int sendLeft = socket_send_left(pData->fd);
                 if (data->tcp.rBufLen > 0) {
-                    printf("%-10s %-16s -> %-16s \n", "payload", saddr, daddr);
+                    pinfo("payload", data->tcp.sip, data->tcp.dip);
 
                     int n = (sendLeft > data->tcp.rBufLen)
                                 ? data->tcp.rBufLen

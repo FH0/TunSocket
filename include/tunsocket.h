@@ -11,6 +11,7 @@
 #include <netinet/ip6.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -20,11 +21,11 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
-#include <pthread.h>
 
 enum {
     TS_MTU = 1,
@@ -34,8 +35,7 @@ enum {
     TS_TCP_RMAX,
     TS_TCP_WMAX,
     TS_ADDR,
-    TS_ADDR6,
-    TS_TCP_ET
+    TS_ADDR6
 };
 
 #define TS_CONNECT 0x01
@@ -65,12 +65,14 @@ typedef struct ts_data {
             char *wBuf;
             int rBufLen;
             int wBufLen;
-            int rBufPointer; /* ring buffer */
-            int wBufPointer; /* ring buffer */
+            int rBufPointer;       /* ring buffer */
+            int wBufPointer;       /* ring buffer */
             pthread_mutex_t rLock; /* thread safe */
             pthread_mutex_t wLock; /* thread safe */
-            int ack;
-            int seq;
+            long long timeout;
+            uint32_t ack;
+            uint32_t seq;
+            uint32_t peerAck;
             struct ts_data *next;
             struct ts_data *last;
             void *ptr;

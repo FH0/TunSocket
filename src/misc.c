@@ -1,5 +1,73 @@
 #include "misc.h"
 
+inline long long get_usec() {
+    struct timeval time;
+    gettimeofday(&time, NULL);
+    return time.tv_sec * 1000 * 1000 + time.tv_usec;
+}
+
+int ts_timeout_read(int fd, char *buf, int bufSize, int timeout) {
+    int nread;
+    long long startTime = get_usec();
+
+    for (;;) {
+        nread = read(fd, buf, bufSize);
+        if (nread > 0) {
+            errno = 0;
+            return nread;
+        }
+        if ((nread == -1) && (errno == EAGAIN)) {
+            long long nowTime = get_usec();
+            if ((startTime - nowTime) > timeout * 1000) {
+                errno = ETIME;
+                return -1;
+            }
+        } else {
+            ASSERT(0 && "fd read() error");
+        }
+    }
+}
+
+int ring_input(char *ringBuf, int ringSize, int p, int *len, char *buf,
+               int bufLen) {
+    if ((*len >= ringSize) || (bufLen <= 0)) {
+        errno = EAGAIN;
+        return -1;
+    }
+    int ringLeft = ringSize - *len;
+    int inLen = (ringLeft < bufLen) ? ringLeft : bufLen;
+    if ((p + *len + inLen) <= ringSize) {
+        memcpy(&ringBuf[p], buf, inLen);
+    } else {
+        int nleft = p + inLen - ringSize;
+        int nright = inLen - nleft;
+        memcpy(&ringBuf[p], buf, nright);
+        memcpy(ringBuf, &buf[nright], nleft);
+    }
+    *len += inLen;
+    errno = 0;
+    return inLen;
+}
+
+int ring_copy_out(char *ringBuf, int ringSize, int p, int len, char *buf,
+                  int bufLen) {
+    if ((len <= 0) || (bufLen <= 0)) {
+        errno = EAGAIN;
+        return -1;
+    }
+    int outLen = (len < bufLen) ? len : bufLen;
+    if ((p + outLen) <= ringSize) {
+        memcpy(buf, &ringBuf[p], outLen);
+    } else {
+        int nleft = p + outLen - ringSize;
+        int nright = outLen - nleft;
+        memcpy(buf, &ringBuf[p], nright);
+        memcpy(&buf[nright], ringBuf, nleft);
+    }
+    errno = 0;
+    return outLen;
+}
+
 inline void *ts_malloc(int len) {
     void *ptr = calloc(len, 1);
     ASSERT(ptr != NULL);

@@ -1,7 +1,23 @@
 #include "tcp.h"
 #include "event.h"
 #include "misc.h"
+
+#define ACK_SYN_TIMEOUT (2 * 1000 * 1000)     /* us */
+#define ACK_FIN_TIMEOUT (2 * 1000 * 1000)     /* us */
+#define ACK_PAYLOAD_TIMEOUT (2 * 1000 * 1000) /* us */
+
 static void handle_tcp_ack(ts_data_t *data, char flag);
+static void tcp_remove(ts_data_t *data);
+
+static inline void tcp_remove(ts_data_t *data) {
+    data->tcp.last->tcp.next = data->tcp.next;
+    if (data->tcp.next)
+        data->tcp.next->tcp.last = data->tcp.last;
+
+    ts_free(data->tcp.rBuf);
+    ts_free(data->tcp.wBuf);
+    ts_free(data);
+}
 
 int ts_tcp_read(ts_data_t *data, char *buf, int bufLen) {
     int n = -1;
@@ -11,20 +27,10 @@ int ts_tcp_read(ts_data_t *data, char *buf, int bufLen) {
         if (data->tcp.rBufLen > 0) {
             pthread_mutex_lock(&data->tcp.rLock);
 
-            n = (bufLen > data->tcp.rBufLen) ? data->tcp.rBufLen : bufLen;
-            errno = 0;
-
-            if ((data->tcp.rBufPointer + n) > tcpRMax) {
-                int nright = data->tcp.rBufPointer + n - tcpRMax;
-                int nleft = n - nright;
-                memcpy(buf, &data->tcp.rBuf[data->tcp.rBufPointer], nright);
-                memcpy(&buf[nright], data->tcp.rBuf, nleft);
-                data->tcp.rBufPointer += n - tcpRMax;
-            } else {
-                memcpy(buf, &data->tcp.rBuf[data->tcp.rBufPointer], n);
-                data->tcp.rBufPointer += n;
-            }
+            n = ring_copy_out(data->tcp.rBuf, tcpRMax, data->tcp.rBufPointer,
+                              data->tcp.rBufLen, buf, bufLen);
             data->tcp.rBufLen -= n;
+            data->tcp.rBufPointer = (data->tcp.rBufPointer + n) % tcpRMax;
 
             pthread_mutex_unlock(&data->tcp.rLock);
         } else if (data->tcp.status == 0) {
@@ -32,8 +38,8 @@ int ts_tcp_read(ts_data_t *data, char *buf, int bufLen) {
         } else if (data->tcp.status & 0xe0) {
             n = 0; /* closed by peer */
             errno = 0;
-        } else if (data->tcp.status & 0x10) {
-            errno = EPIPE; /* ack rst */
+        } else if (data->tcp.status & 0x11) {
+            errno = EPIPE; /* rst recv or peer closed */
         }
     }
 
@@ -46,49 +52,17 @@ int ts_tcp_write(ts_data_t *data, char *buf, int bufLen) {
 
     if ((data->type == TS_RABLE) || (data->type == TS6_RABLE) ||
         (data->type == TS_WABLE) || (data->type == TS6_WABLE)) {
-        int bufLeft = tcpWMax - data->tcp.wBufLen;
-        n = (bufLeft < bufLen) ? bufLeft : bufLen;
-        errno = 0;
-
-        if (n <= 0) {
-            data->tcp.status |= 0x08; /* WABLE callback status */
-            errno = EAGAIN;
-            return -1;
-        }
-
         pthread_mutex_lock(&data->tcp.rLock);
 
-        if ((data->tcp.wBufPointer + data->tcp.wBufLen) <= tcpWMax) {
-            if ((data->tcp.wBufPointer + data->tcp.wBufLen + n) <= tcpWMax) {
-                memcpy(
-                    &data->tcp.wBuf[data->tcp.wBufPointer + data->tcp.wBufLen],
-                    buf, n);
-            } else {
-                int nleft =
-                    data->tcp.wBufPointer + data->tcp.wBufLen + n - tcpWMax;
-                int nright = n - nleft;
-                memcpy(
-                    &data->tcp.wBuf[data->tcp.wBufPointer + data->tcp.wBufLen],
-                    buf, nright);
-                memcpy(data->tcp.wBuf, &buf[nright], nleft);
-            }
-        } else {
-            memcpy(&data->tcp.wBuf[data->tcp.wBufPointer + data->tcp.wBufLen -
-                                   tcpWMax],
-                   buf, n);
-        }
-        if (data->tcp.wBufLen == 0) {
-            data->tcp.wBufLen += n;
+        n = ring_input(data->tcp.wBuf, tcpWMax, data->tcp.wBufPointer,
+                       &data->tcp.wBufLen, buf, bufLen);
+        if ((data->tcp.wBufLen <= n) && (data->tcp.wBufLen > 0))
             tcp_write(data);
-        } else {
-            data->tcp.wBufLen += n;
-        }
-        if (n == bufLeft) {
+        if (n < bufLen)
             data->tcp.status |= 0x08; /* WABLE callback status */
-        }
-    }
 
-    pthread_mutex_unlock(&data->tcp.rLock);
+        pthread_mutex_unlock(&data->tcp.rLock);
+    }
 
     return n;
 }
@@ -119,79 +93,66 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
     int iphdrLen = (flag == 4) ? (buf[0] & 0x0f) * 4 : 40;
     ts_data_t *tmp;
     int tcpFlag = buf[iphdrLen + 13] & 0x3f;
-    uint16_t peerWindow = ntohs(*(uint16_t *)&buf[iphdrLen + 14]);
 
     /* search in tcp queue */
     for (tmp = tcpHead->tcp.next; tmp; tmp = tmp->tcp.next) {
         if (flag == 4) {
             if ((tmp->tcp.sport != *(uint16_t *)&buf[iphdrLen]) ||
-                (0 != (memcmp(tmp->tcp.sip, &buf[12], 4)))) {
+                (0 != (memcmp(tmp->tcp.sip, &buf[12], 4))))
                 continue;
-            }
         } else {
             if ((tmp->tcp.sport != *(uint16_t *)&buf[iphdrLen]) ||
-                (0 != (memcmp(tmp->tcp.sip, &buf[8], 16)))) {
+                (0 != (memcmp(tmp->tcp.sip, &buf[8], 16))))
                 continue;
-            }
         }
 
         int tcphdrLen = (*(uint8_t *)&buf[iphdrLen + 12] >> 4) * 4;
         int payloadLen = bufLen - iphdrLen - tcphdrLen;
+        uint32_t peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
+        tmp->tcp.window = ntohs(*(uint16_t *)&buf[iphdrLen + 14]);
 
-        /* ack with payload */
-        if (payloadLen) {
-            tmp->tcp.ack =
-                htonl(ntohl(*(int *)&buf[iphdrLen + 4]) + payloadLen);
-            tmp->tcp.seq = htonl(ntohl(*(int *)&buf[iphdrLen + 8]));
-            if (!(tmp->tcp.status & 0x20)) {
-                tmp->tcp.window = peerWindow;
-                if ((tmp->tcp.rBufPointer + tmp->tcp.rBufLen) <= tcpRMax) {
-                    if ((tmp->tcp.rBufPointer + tmp->tcp.rBufLen +
-                         payloadLen) <= tcpRMax) {
-                        memcpy(&tmp->tcp.rBuf[tmp->tcp.rBufPointer +
-                                              tmp->tcp.rBufLen],
-                               &buf[iphdrLen + tcphdrLen], payloadLen);
-                    } else {
-                        int nleft = tmp->tcp.rBufPointer + tmp->tcp.rBufLen +
-                                    payloadLen - tcpRMax;
-                        int nright = payloadLen - nleft;
-                        memcpy(&tmp->tcp.rBuf[tmp->tcp.rBufPointer +
-                                              tmp->tcp.rBufLen],
-                               &buf[iphdrLen + tcphdrLen], nright);
-                        memcpy(tmp->tcp.rBuf,
-                               &buf[iphdrLen + tcphdrLen + nright], nleft);
-                    }
-                } else {
-                    memcpy(&tmp->tcp.rBuf[tmp->tcp.rBufPointer +
-                                          tmp->tcp.rBufLen - tcpRMax],
-                           &buf[iphdrLen + tcphdrLen], payloadLen);
-                }
-                tmp->tcp.rBufLen += payloadLen;
+        /* handle payload */
+        if (payloadLen > 0) {
+            uint32_t peerSeq = ntohl(*(int *)&buf[iphdrLen + 4]);
+            if (tmp->tcp.ack == peerSeq) {
+                if (!(tmp->tcp.status & 0x20)) /* ts_tcp_close, drop payload */
+                    ring_input(tmp->tcp.rBuf, tcpRMax, tmp->tcp.rBufPointer,
+                               &tmp->tcp.rBufLen, &buf[iphdrLen + tcphdrLen],
+                               payloadLen);
+                tmp->tcp.ack += payloadLen;
             }
-
             handle_tcp_ack(tmp, 0x01); /* ack */
-
-            if ((tcpET == 1) && (!(tmp->tcp.status & 0x22))) {
-                ts_cb(tmp);
-            }
         }
-        /* ack */
-        else if (tcpFlag == 0x10) {
+        /* Fast retransmission or update info */
+        if ((tmp->tcp.peerAck == peerAck) && (tmp->type != TS_CONNECT) &&
+            (tmp->type != TS6_CONNECT)) {
+            tmp->tcp.seq = tmp->tcp.peerAck;
+            tcp_write(tmp);
+        } else if (tmp->tcp.wBufLen > 0) {
+            uint32_t len = peerAck - tmp->tcp.peerAck;
+            tmp->tcp.wBufPointer = (tmp->tcp.wBufPointer + len) % tcpWMax;
+            tmp->tcp.wBufLen -= len;
+            if (tmp->tcp.wBufLen < 0)
+                tmp->tcp.wBufLen = 0;
+            tmp->tcp.peerAck = peerAck;
+            if (tmp->tcp.wBufLen <= 0)
+                tmp->tcp.timeout = -1;
+        } else if ((tmp->tcp.wBufLen <= 0) && (tmp->tcp.status & 0x40)) {
+            tmp->tcp.timeout = -1;
+        }
+        /* ack and ack psh*/
+        if ((tcpFlag == 0x10) || (tcpFlag == 0x18)) {
             if (tmp->type == TS_CONNECT) {
+                tmp->tcp.peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
+                tmp->tcp.seq += 1;
                 tmp->type = TS_RABLE;
-                tmp->tcp.ack = htonl(ntohl(*(int *)&buf[iphdrLen + 4]));
-                tmp->tcp.seq = htonl(ntohl(*(int *)&buf[iphdrLen + 8]));
-                tmp->tcp.window = peerWindow;
+                tmp->tcp.timeout = -1;
             } else if (tmp->type == TS6_CONNECT) {
+                tmp->tcp.peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
+                tmp->tcp.seq += 1;
                 tmp->type = TS6_RABLE;
-                tmp->tcp.ack = htonl(ntohl(*(int *)&buf[iphdrLen + 4]));
-                tmp->tcp.seq = htonl(ntohl(*(int *)&buf[iphdrLen + 8]));
-                tmp->tcp.window = peerWindow;
+                tmp->tcp.timeout = -1;
             } else if (!(tmp->tcp.status & 0x40)) {
-                tmp->tcp.ack = htonl(ntohl(*(int *)&buf[iphdrLen + 4]));
-                tmp->tcp.seq = htonl(ntohl(*(int *)&buf[iphdrLen + 8]));
-                tmp->tcp.window = peerWindow;
-
                 if (tmp->tcp.wBufLen > 0) {
                     tcp_write(tmp);
                 } else if (tmp->tcp.status & 0x08) {
@@ -206,50 +167,24 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
             }
             /* sent ack fin and recieve ack, should be deleted */
             else if ((tmp->tcp.status & 0xc0) == 0xc0) {
-                tmp->tcp.last->tcp.next = tmp->tcp.next;
-                if (tmp->tcp.next) {
-                    tmp->tcp.next->tcp.last = tmp->tcp.last;
-                }
-                ts_free(tmp->tcp.rBuf);
-                ts_free(tmp->tcp.wBuf);
-                ts_free(tmp);
+                tcp_remove(tmp);
             }
         }
         /* ack fin */
         else if (tcpFlag == 0x11) {
             tmp->tcp.status |= 0x80;
-            tmp->tcp.ack = htonl(ntohl(*(int *)&buf[iphdrLen + 4]) + 1);
-            tmp->tcp.seq = htonl(ntohl(*(int *)&buf[iphdrLen + 8]));
-
-            handle_tcp_ack(tmp, 0x01); /* ack */
-
-            if (tmp->tcp.status & 0x40) { /* ack fin sent already */
-                tmp->tcp.last->tcp.next = tmp->tcp.next;
-                if (tmp->tcp.next) {
-                    tmp->tcp.next->tcp.last = tmp->tcp.last;
-                }
-                ts_free(tmp->tcp.rBuf);
-                ts_free(tmp->tcp.wBuf);
-                ts_free(tmp);
-            } else if (tcpET == 1) {
-                ts_cb(tmp);
-            }
+            tmp->tcp.ack += 1;
+            handle_tcp_ack(tmp, 0x01);  /* ack */
+            if (tmp->tcp.status & 0x40) /* ack fin sent already */
+                tcp_remove(tmp);
         }
-        /* ack rst */
-        else if (tcpFlag == 0x14) {
+        /* rst */
+        else if (tcpFlag & 0x04) {
             tmp->tcp.status = 0x10;
-
             ts_cb(tmp);
-
-            tmp->tcp.last->tcp.next = tmp->tcp.next;
-            if (tmp->tcp.next) {
-                tmp->tcp.next->tcp.last = tmp->tcp.last;
-            }
-            ts_free(tmp->tcp.rBuf);
-            ts_free(tmp->tcp.wBuf);
-            ts_free(tmp);
+            tcp_remove(tmp);
         }
-        /* other tcp flags are ignored */
+        /* ignore other tcp flags  */
 
         return;
     }
@@ -275,10 +210,8 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
         data->tcp.wBufLen = 0;
         data->tcp.rBufPointer = 0;
         data->tcp.wBufPointer = 0;
-        data->tcp.window = peerWindow;
         data->tcp.mss = ntohs(*(uint16_t *)&buf[iphdrLen + 22]);
-        data->tcp.seq = 0;
-        data->tcp.ack = htonl(ntohl(*(int *)&buf[iphdrLen + 4]) + 1);
+        data->tcp.ack = ntohl(*(int *)&buf[iphdrLen + 4]) + 1;
         data->tcp.status = 0x00;
         data->tcp.next = NULL;
         data->tcp.ptr = NULL;
@@ -291,8 +224,7 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
         tmp->tcp.next = data;
         data->tcp.last = tmp;
 
-        /* ack syn */
-        handle_tcp_ack(data, 0x00);
+        handle_tcp_ack(data, 0x00); /* ack syn */
 
         ts_cb(data);
 
@@ -363,109 +295,133 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
     SILENT(write(tunFd, bufTmp, bufTmpLen));
 }
 
-void tcp_write(ts_data_t *data) {
-    if ((data->tcp.wBufLen <= 0) || (data->tcp.window <= 0)) {
-        return;
+void handle_tcp_queue(ts_data_t *data) {
+    long long nowTime = get_usec();
+    if ((data->tcp.timeout != -1) && (nowTime > data->tcp.timeout)) {
+        if ((data->type == TS_CONNECT) || (data->type == TS6_CONNECT))
+            handle_tcp_ack(data, 0x00); /* ack syn */
+        else if (data->tcp.wBufLen == 0)
+            handle_tcp_ack(data, 0x02); /* ack fin */
+        else if (data->tcp.wBufLen > 0)
+            tcp_write(data);
     }
-
-    int tcphdrLen = 20;
-    int iphdrLen = (data->type & 0x0f) ? 20 : 40;
-    int payloadLen;
-    if (data->tcp.window < data->tcp.wBufLen) {
-        if (data->tcp.window < data->tcp.mss) {
-            payloadLen = data->tcp.window;
-        } else {
-            payloadLen = data->tcp.mss;
-        }
-    } else {
-        if (data->tcp.wBufLen < data->tcp.mss) {
-            payloadLen = data->tcp.wBufLen;
-        } else {
-            payloadLen = data->tcp.mss;
+    if (!(data->tcp.status & 0x02)) {
+        if ((!(data->tcp.status & 0x20)) && (data->tcp.rBufLen > 0))
+            ts_cb(data);
+        if ((data->tcp.rBufLen <= 0) && (data->tcp.status & 0x80) &&
+            (!(data->tcp.status & 0x01))) {
+            ts_cb(data);
+            data->tcp.status |= 0x01;
         }
     }
-    int bufTmpLen = iphdrLen + tcphdrLen + payloadLen;
-    data->tcp.window = 0; /* reset when recv peer ack */
-    char bufTmp[bufTmpLen];
-
-    if (data->type & 0x0f) {
-        struct iphdr *ip = (struct iphdr *)&bufTmp[0];
-        ip->version = 4;
-        ip->ihl = 5;
-        ip->tos = 0;
-        ip->tot_len = htons(bufTmpLen);
-        ip->id = 0;
-        ip->frag_off = 0;
-        ip->ttl = 64;
-        ip->protocol = 6;
-        ip->check = 0;
-        memcpy(&ip->saddr, data->tcp.dip, 4);
-        memcpy(&ip->daddr, data->tcp.sip, 4);
-        ip->check = calculate_checksum((uint16_t *)ip, iphdrLen);
-    } else {
-        struct ip6_hdr *ip6 = (struct ip6_hdr *)&bufTmp[0];
-        ip6->ip6_flow = htonl(6 << 28);
-        ip6->ip6_plen = htons(bufTmpLen - iphdrLen);
-        ip6->ip6_nxt = 6;
-        ip6->ip6_hlim = 64;
-        memcpy(&ip6->ip6_src, data->tcp.dip, 16);
-        memcpy(&ip6->ip6_dst, data->tcp.sip, 16);
-    }
-
-    struct tcphdr *tcp = (struct tcphdr *)&bufTmp[iphdrLen];
-    tcp->source = data->tcp.dport;
-    tcp->dest = data->tcp.sport;
-    tcp->seq = data->tcp.seq;
-    tcp->ack_seq = data->tcp.ack;
-    tcp->res1 = 0;
-    tcp->doff = 20 / 4;
-    ((char *)tcp)[13] = 0x18; /* ack psh */
-    if ((tcpWMax - data->tcp.wBufLen) > 65535) {
-        tcp->window = htons(65535);
-    } else {
-        tcp->window = htons(tcpWMax - data->tcp.wBufLen);
-    }
-    tcp->check = 0;
-    tcp->urg_ptr = 0;
-
-    if ((data->tcp.wBufPointer + payloadLen) > tcpWMax) {
-        int nright = data->tcp.wBufPointer + payloadLen - tcpWMax;
-        int nleft = payloadLen - nright;
-        memcpy(&bufTmp[iphdrLen + tcphdrLen],
-               &data->tcp.wBuf[data->tcp.wBufPointer], nright);
-        memcpy(&bufTmp[iphdrLen + tcphdrLen + nright], data->tcp.wBuf, nleft);
-        data->tcp.wBufPointer += payloadLen - tcpWMax;
-    } else {
-        memcpy(&bufTmp[iphdrLen + tcphdrLen],
-               &data->tcp.wBuf[data->tcp.wBufPointer], payloadLen);
-        data->tcp.wBufPointer += payloadLen;
-    }
-    data->tcp.wBufLen -= payloadLen;
-
-    if (data->type & 0x0f) {
-        char bufChecksum[12 + bufTmpLen - iphdrLen];
-        memcpy(bufChecksum, data->tcp.dip, 4);
-        memcpy(&bufChecksum[4], data->tcp.sip, 4);
-        *(uint16_t *)&bufChecksum[8] = htons(6);
-        *(uint16_t *)&bufChecksum[10] = htons(bufTmpLen - iphdrLen);
-        memcpy(&bufChecksum[12], &bufTmp[iphdrLen], bufTmpLen - iphdrLen);
-        tcp->check = calculate_checksum((uint16_t *)bufChecksum,
-                                        12 + bufTmpLen - iphdrLen);
-    } else {
-        char bufChecksum[36 + bufTmpLen - iphdrLen];
-        memcpy(bufChecksum, data->tcp.dip, 16);
-        memcpy(&bufChecksum[16], data->tcp.sip, 16);
-        *(uint16_t *)&bufChecksum[32] = htons(6);
-        *(uint16_t *)&bufChecksum[34] = htons(bufTmpLen - iphdrLen);
-        memcpy(&bufChecksum[36], &bufTmp[iphdrLen], bufTmpLen - iphdrLen);
-        tcp->check = calculate_checksum((uint16_t *)bufChecksum,
-                                        36 + bufTmpLen - iphdrLen);
-    }
-
-    SILENT(write(tunFd, bufTmp, bufTmpLen));
 }
 
-void handle_tcp_ack(ts_data_t *data, char flag) {
+void tcp_write(ts_data_t *data) {
+    if (data->tcp.wBufLen <= 0)
+        return;
+
+    int detection = (data->tcp.window == 0) ? 1 : 0;
+    uint16_t peerWindowLeft =
+        data->tcp.peerAck + data->tcp.window - data->tcp.seq;
+    if (!(peerWindowLeft))
+        return; /* zero make no sense */
+    int sendLen = (peerWindowLeft < data->tcp.wBufLen) ? peerWindowLeft
+                                                       : data->tcp.wBufLen;
+    int sendTimes = sendLen / data->tcp.mss + 1;
+    printf("sendLen %d peerAck %d window %d wBufLen %d  seq %d \n", sendLen,
+           data->tcp.peerAck, data->tcp.window, data->tcp.wBufLen,
+           data->tcp.seq);
+    uint16_t window = ((tcpWMax - data->tcp.wBufLen) > 65535)
+                          ? htons(65535)
+                          : htons(tcpWMax - data->tcp.wBufLen);
+    int p = data->tcp.wBufPointer;
+    for (int i = 0; i < sendTimes; i++) {
+        int iphdrLen = (data->type & 0x0f) ? 20 : 40;
+        int tcphdrLen = 20;
+        int payloadLen;
+        if ((sendTimes - i) == 1) {
+            if (detection)
+                payloadLen = 0;
+            else
+                payloadLen = (sendLen % data->tcp.mss)
+                                 ? (sendLen % data->tcp.mss)
+                                 : data->tcp.mss;
+        } else {
+            payloadLen = data->tcp.mss;
+        }
+        int bufTmpLen = iphdrLen + tcphdrLen + payloadLen;
+        char bufTmp[bufTmpLen];
+
+        if (data->type & 0x0f) {
+            struct iphdr *ip = (struct iphdr *)&bufTmp[0];
+            ip->version = 4;
+            ip->ihl = 5;
+            ip->tos = 0;
+            ip->tot_len = htons(bufTmpLen);
+            ip->id = 0;
+            ip->frag_off = 0;
+            ip->ttl = 64;
+            ip->protocol = 6;
+            ip->check = 0;
+            memcpy(&ip->saddr, data->tcp.dip, 4);
+            memcpy(&ip->daddr, data->tcp.sip, 4);
+            ip->check = calculate_checksum((uint16_t *)ip, iphdrLen);
+        } else {
+            struct ip6_hdr *ip6 = (struct ip6_hdr *)&bufTmp[0];
+            ip6->ip6_flow = htonl(6 << 28);
+            ip6->ip6_plen = htons(bufTmpLen - iphdrLen);
+            ip6->ip6_nxt = 6;
+            ip6->ip6_hlim = 64;
+            memcpy(&ip6->ip6_src, data->tcp.dip, 16);
+            memcpy(&ip6->ip6_dst, data->tcp.sip, 16);
+        }
+
+        struct tcphdr *tcp = (struct tcphdr *)&bufTmp[iphdrLen];
+        tcp->source = data->tcp.dport;
+        tcp->dest = data->tcp.sport;
+        tcp->seq = htonl(data->tcp.seq);
+        tcp->ack_seq = htonl(data->tcp.ack);
+        tcp->res1 = 0;
+        tcp->doff = 20 / 4;
+        ((char *)tcp)[13] = 0x18; /* ack psh */
+        tcp->window = window;
+        tcp->check = 0;
+        tcp->urg_ptr = 0;
+
+        if (!(detection)) {
+            ring_copy_out(data->tcp.wBuf, tcpWMax, p, payloadLen,
+                          &bufTmp[iphdrLen + tcphdrLen], payloadLen);
+            p = (p + payloadLen) % tcpWMax;
+            data->tcp.seq += payloadLen;
+        }
+
+        if (data->type & 0x0f) {
+            char bufChecksum[12 + bufTmpLen - iphdrLen];
+            memcpy(bufChecksum, data->tcp.dip, 4);
+            memcpy(&bufChecksum[4], data->tcp.sip, 4);
+            *(uint16_t *)&bufChecksum[8] = htons(6);
+            *(uint16_t *)&bufChecksum[10] = htons(bufTmpLen - iphdrLen);
+            memcpy(&bufChecksum[12], &bufTmp[iphdrLen], bufTmpLen - iphdrLen);
+            tcp->check = calculate_checksum((uint16_t *)bufChecksum,
+                                            12 + bufTmpLen - iphdrLen);
+        } else {
+            char bufChecksum[36 + bufTmpLen - iphdrLen];
+            memcpy(bufChecksum, data->tcp.dip, 16);
+            memcpy(&bufChecksum[16], data->tcp.sip, 16);
+            *(uint16_t *)&bufChecksum[32] = htons(6);
+            *(uint16_t *)&bufChecksum[34] = htons(bufTmpLen - iphdrLen);
+            memcpy(&bufChecksum[36], &bufTmp[iphdrLen], bufTmpLen - iphdrLen);
+            tcp->check = calculate_checksum((uint16_t *)bufChecksum,
+                                            36 + bufTmpLen - iphdrLen);
+        }
+
+        SILENT(write(tunFd, bufTmp, bufTmpLen));
+    }
+
+    data->tcp.timeout = get_usec() + ACK_PAYLOAD_TIMEOUT; /* update timer */
+}
+
+static void handle_tcp_ack(ts_data_t *data, char flag) {
     int iphdrLen = (data->type & 0x0f) ? 20 : 40;
     int tcphdrLen = (0x00 == flag) ? 24 : 20;
     int bufTmpLen = iphdrLen + tcphdrLen;
@@ -498,30 +454,31 @@ void handle_tcp_ack(ts_data_t *data, char flag) {
     struct tcphdr *tcp = (struct tcphdr *)&bufTmp[iphdrLen];
     tcp->source = data->tcp.dport;
     tcp->dest = data->tcp.sport;
-    tcp->seq = data->tcp.seq;
-    tcp->ack_seq = data->tcp.ack;
+    tcp->seq = htonl(data->tcp.seq);
+    tcp->ack_seq = htonl(data->tcp.ack);
     tcp->res1 = 0;
     tcp->doff = tcphdrLen / 4;
     if (flag == 0x00) {
         ((char *)tcp)[13] = 0x12; /* ack syn */
+        data->tcp.timeout = get_usec() + ACK_SYN_TIMEOUT;
     } else if (flag == 0x01) {
         ((char *)tcp)[13] = 0x10; /* ack */
     } else if (flag == 0x02) {
         ((char *)tcp)[13] = 0x11; /* ack fin */
+        data->tcp.timeout = get_usec() + ACK_FIN_TIMEOUT;
+        data->tcp.seq += 1;
     }
-    if ((tcpRMax - data->tcp.rBufLen) > 65535) {
+    if ((tcpRMax - data->tcp.rBufLen) > 65535)
         tcp->window = htons(65535);
-    } else {
+    else
         tcp->window = htons(tcpRMax - data->tcp.rBufLen);
-    }
     tcp->check = 0;
     tcp->urg_ptr = 0;
 
     /* tcp mss */
-    if (flag == 0x00) {
+    if (flag == 0x00)
         *(int *)&bufTmp[iphdrLen + tcphdrLen - 4] =
             htonl(0x02040000 + data->tcp.mss);
-    }
 
     if (data->type & 0x0f) {
         char bufChecksum[12 + tcphdrLen];
