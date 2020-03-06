@@ -129,14 +129,14 @@ void tcp_cb(ts_data_t *data) {
             pinfo("payload", data->tcp.sip, data->tcp.dip);
             int sendLeft = socket_send_left(pData->fd);
             if (sendLeft > 0) {
-                int n = (sendLeft > data->tcp.rBufLen)
-                            ? data->tcp.rBufLen
-                            : sendLeft; /* how much data need to handle */
-                char tmp[n];
-                ts_tcp_read(data, tmp, n);
-                SILENT(write(pData->fd, tmp, n));
-                if (sendLeft <= data->tcp.rBufLen) { /* make it EAGAIN */
-                    SILENT(write(pData->fd, "1", 1));
+                if (data->tcp.rBufLen <= sendLeft) {
+                    char tmp[data->tcp.rBufLen];
+                    ts_tcp_read(data, tmp, data->tcp.rBufLen);
+                    SILENT(write(pData->fd, tmp, data->tcp.rBufLen));
+                } else {
+                    char tmp[sendLeft + 1];
+                    ts_tcp_read(data, tmp, sendLeft);
+                    SILENT(write(pData->fd, tmp, sendLeft + 1));
                 }
             }
         }
