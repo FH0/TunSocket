@@ -8,6 +8,7 @@ extern uint32_t tcpWMax;
 extern ts_data_t *tcpHead;
 extern int tunFd;
 extern uint32_t tunMtu;
+extern uint32_t timeOut;
 
 extern void (*ts_cb)(ts_data_t *data);
 

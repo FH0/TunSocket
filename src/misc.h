@@ -28,5 +28,6 @@ int ring_input(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t *len,
                char *buf, int bufLen);
 int ring_copy_out(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t len,
                   char *buf, int bufLen);
+void save_to_file(char *file, char *buf, int bufLen);
 
 #endif /* MISC_H__VFH5Y */

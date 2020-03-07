@@ -6,20 +6,21 @@ inline uint64_t get_usec() {
     return time.tv_sec * 1000 * 1000 + time.tv_usec;
 }
 
-int ring_input(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t *len, char *buf,
-               int bufLen) {
-    if ((*len >= ringSize) || (bufLen <= 0)) {
+int ring_input(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t *len,
+               char *buf, int bufLen) {
+    if (*len >= ringSize || bufLen <= 0) {
         errno = EAGAIN;
         return -1;
     }
     int ringLeft = ringSize - *len;
     int inLen = (ringLeft < bufLen) ? ringLeft : bufLen;
-    if ((p + *len + inLen) <= ringSize) {
-        memcpy(&ringBuf[p], buf, inLen);
+    uint32_t pEnd = (p + *len) % ringSize;
+    if ((pEnd + inLen) <= ringSize) {
+        memcpy(&ringBuf[pEnd], buf, inLen);
     } else {
-        int nleft = p + inLen - ringSize;
+        int nleft = pEnd + inLen - ringSize;
         int nright = inLen - nleft;
-        memcpy(&ringBuf[p], buf, nright);
+        memcpy(&ringBuf[pEnd], buf, nright);
         memcpy(ringBuf, &buf[nright], nleft);
     }
     *len += inLen;
@@ -27,8 +28,8 @@ int ring_input(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t *len, char
     return inLen;
 }
 
-int ring_copy_out(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t len, char *buf,
-                  int bufLen) {
+int ring_copy_out(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t len,
+                  char *buf, int bufLen) {
     if ((len <= 0) || (bufLen <= 0)) {
         errno = EAGAIN;
         return -1;
@@ -86,4 +87,10 @@ inline void hex_dump(char *ptr, int ptrLen) {
         printf("\n");
     }
     printf("\n\n");
+}
+
+inline void save_to_file(char *file, char *buf, int bufLen) {
+    FILE *f = fopen(file, "ab");
+    fwrite(buf, 1, bufLen, f);
+    fclose(f);
 }

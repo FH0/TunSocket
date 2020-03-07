@@ -14,6 +14,8 @@
     } while (0)
 #define SILENT(ptr) (void)((ptr) + 1);
 
+extern void save_to_file(char *file, char *buf, int bufLen);
+
 int socket_send_left(int sockFd) {
     socklen_t intLen = sizeof(int);
     int sendMax, sendUsed;
@@ -110,7 +112,7 @@ void tcp_cb(ts_data_t *data) {
             close(pData->fd);
             ts_tcp_close(data);
             ts_free(data->tcp.ptr);
-        } else if (data->tcp.rBufLen <= 0) {
+        } else if (data->tcp.rBufLen == 0) {
             if ((tcp_status(pData->fd)) == TCP_CLOSE_WAIT) {
                 pinfo("close", data->tcp.dip, data->tcp.sip);
                 epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
@@ -123,20 +125,20 @@ void tcp_cb(ts_data_t *data) {
                 shutdown(pData->fd, 1); /* close write stream */
             }
         } else {
-            if ((tcp_status(pData->fd)) == TCP_SYN_SENT) {
+            if ((tcp_status(pData->fd)) == TCP_SYN_SENT)
                 return;
-            }
+
             pinfo("payload", data->tcp.sip, data->tcp.dip);
             int sendLeft = socket_send_left(pData->fd);
             int n = data->tcp.rBufLen;
-            if (sendLeft <= n) {
-                char tmp[sendLeft];
-                ts_tcp_read(data, tmp, sendLeft);
-                SILENT(write(pData->fd, tmp, sendLeft));
-            } else {
-                char tmp[n + 1];
+            if (n <= sendLeft) {
+                char tmp[n];
                 ts_tcp_read(data, tmp, n);
-                SILENT(write(pData->fd, tmp, n + 1));
+                SILENT(write(pData->fd, tmp, n));
+            } else {
+                char tmp[sendLeft + 1];
+                ts_tcp_read(data, tmp, sendLeft);
+                SILENT(write(pData->fd, tmp, sendLeft + 1));
             }
         }
     } else if (data->type == TS_WABLE) {
@@ -185,9 +187,9 @@ void thread2_cb(void *arg) {
                     struct tcp_info info;
                     socklen_t len = sizeof(info);
                     getsockopt(pData->fd, IPPROTO_TCP, TCP_INFO, &info, &len);
-                    if (info.tcpi_state == TCP_ESTABLISHED) {
+                    if (info.tcpi_state == TCP_ESTABLISHED)
                         break; /* EAGAIN */
-                    }
+
                     if ((info.tcpi_state == TCP_CLOSE_WAIT) &&
                         (!(data->tcp.status & 0x80))) {
                         ts_tcp_shutdown(data);
@@ -212,10 +214,12 @@ void thread2_cb(void *arg) {
                     if (recvUsed <= wBufLeft) {
                         char tmp[recvUsed];
                         SILENT(read(pData->fd, tmp, recvUsed));
+                        // save_to_file("raw", tmp, recvUsed);
                         ts_tcp_write(data, tmp, recvUsed);
                     } else {
                         char tmp[wBufLeft + 1];
                         SILENT(read(pData->fd, tmp, wBufLeft));
+                        // save_to_file("raw", tmp, wBufLeft);
                         ts_tcp_write(data, tmp, wBufLeft + 1);
                     }
                 }
@@ -225,14 +229,15 @@ void thread2_cb(void *arg) {
                     pinfo("payload", data->tcp.sip, data->tcp.dip);
 
                     int n = data->tcp.rBufLen;
-                    if (sendLeft <= n) {
-                        char tmp[sendLeft];
-                        ts_tcp_read(data, tmp, sendLeft);
-                        SILENT(write(pData->fd, tmp, sendLeft));
-                    } else {
-                        char tmp[n + 1];
+                    printf("rBufLen %d\n", data->tcp.rBufLen);
+                    if (n <= sendLeft) {
+                        char tmp[n];
                         ts_tcp_read(data, tmp, n);
-                        SILENT(write(pData->fd, tmp, n + 1));
+                        SILENT(write(pData->fd, tmp, n));
+                    } else {
+                        char tmp[sendLeft + 1];
+                        ts_tcp_read(data, tmp, sendLeft);
+                        SILENT(write(pData->fd, tmp, sendLeft + 1));
                     }
                 }
             } else {

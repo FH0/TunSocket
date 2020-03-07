@@ -14,6 +14,7 @@ uint32_t tcpWMax = 192 * 1024;
 ts_data_t *tcpHead;
 int tunFd;
 uint32_t tunMtu = 65535;
+uint32_t timeOut = 2 * 1000 * 1000;
 
 void (*ts_cb)(ts_data_t *data);
 
