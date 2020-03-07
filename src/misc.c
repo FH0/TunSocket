@@ -1,34 +1,12 @@
 #include "misc.h"
 
-inline long long get_usec() {
+inline uint64_t get_usec() {
     struct timeval time;
     gettimeofday(&time, NULL);
     return time.tv_sec * 1000 * 1000 + time.tv_usec;
 }
 
-int ts_timeout_read(int fd, char *buf, int bufSize, int timeout) {
-    int nread;
-    long long startTime = get_usec();
-
-    for (;;) {
-        nread = read(fd, buf, bufSize);
-        if (nread > 0) {
-            errno = 0;
-            return nread;
-        }
-        if ((nread == -1) && (errno == EAGAIN)) {
-            long long nowTime = get_usec();
-            if ((startTime - nowTime) > timeout * 1000) {
-                errno = ETIME;
-                return -1;
-            }
-        } else {
-            ASSERT(0 && "fd read() error");
-        }
-    }
-}
-
-int ring_input(char *ringBuf, int ringSize, int p, int *len, char *buf,
+int ring_input(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t *len, char *buf,
                int bufLen) {
     if ((*len >= ringSize) || (bufLen <= 0)) {
         errno = EAGAIN;
@@ -49,7 +27,7 @@ int ring_input(char *ringBuf, int ringSize, int p, int *len, char *buf,
     return inLen;
 }
 
-int ring_copy_out(char *ringBuf, int ringSize, int p, int len, char *buf,
+int ring_copy_out(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t len, char *buf,
                   int bufLen) {
     if ((len <= 0) || (bufLen <= 0)) {
         errno = EAGAIN;

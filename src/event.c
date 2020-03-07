@@ -9,20 +9,23 @@ static char *tunName = "tun3";
 static char *tunAddr = "10.5.5.5";
 static char *tunAddr6 = "fd00::5";
 
-int tcpRMax = 192 * 1024;
-int tcpWMax = 192 * 1024;
+uint32_t tcpRMax = 192 * 1024;
+uint32_t tcpWMax = 192 * 1024;
 ts_data_t *tcpHead;
 int tunFd;
-int tunMtu = 65535;
+uint32_t tunMtu = 65535;
 
 void (*ts_cb)(ts_data_t *data);
+
+static void thread1_cb(void *arg);
+static void thread2_cb(void *arg);
 
 void ts_set(int flag, ...) {
     va_list ap;
 
     va_start(ap, flag);
     if (flag == TS_MTU) {
-        tunMtu = va_arg(ap, int);
+        tunMtu = va_arg(ap, uint32_t);
     } else if (flag == TS_UNIX_PATH) {
         unixPath = va_arg(ap, char *);
     } else if (flag == TS_TUN_PATH) {
@@ -30,9 +33,9 @@ void ts_set(int flag, ...) {
     } else if (flag == TS_TUN_NAME) {
         tunName = va_arg(ap, char *);
     } else if (flag == TS_TCP_RMAX) {
-        tcpRMax = va_arg(ap, int);
+        tcpRMax = va_arg(ap, uint32_t);
     } else if (flag == TS_TCP_WMAX) {
-        tcpWMax = va_arg(ap, int);
+        tcpWMax = va_arg(ap, uint32_t);
     } else if (flag == TS_ADDR) {
         tunAddr = va_arg(ap, char *);
     } else if (flag == TS_ADDR6) {
@@ -133,27 +136,16 @@ int ts_init() {
     return tunFd;
 }
 
-void ts_run(void (*ts_cb_tmp)(ts_data_t *data)) {
+static void thread1_cb(void *arg) {
     /* buffer to store data from tun, tunMtu as buffer size */
     char *buf = ts_malloc(tunMtu);
-
-    /* init tcp queue head */
-    tcpHead = ts_malloc(sizeof(ts_data_t));
 
     /* buffer to store raw data and udp data */
     ts_data_t *data = ts_malloc(sizeof(ts_data_t));
 
-    /* convey function pointer */
-    ts_cb = ts_cb_tmp;
-
-    /* set non-blocking if tcpET = 0*/
-    ASSERT(-1 != (fcntl(tunFd, F_SETFL, fcntl(tunFd, F_GETFL) | O_NONBLOCK)));
-
     int bufLen;
-    ts_data_t *tmp;
     for (;;) {
-        bufLen =
-            ts_timeout_read(tunFd, buf, tunMtu, 10); /* tunMtu as buffer size */
+        bufLen = read(tunFd, buf, tunMtu);
 
         /* handle data from tun */
         if (bufLen > 20) {
@@ -185,11 +177,41 @@ void ts_run(void (*ts_cb_tmp)(ts_data_t *data)) {
 
                     ts_cb(data);
                 }
-            } /* only  support ipv4 and ipv6 */
+            }
         }
-
-        /* Out of order timeout */ /* ack timeout */ /* Detection window */
-        for (tmp = tcpHead->tcp.next; tmp; tmp = tmp->tcp.next)
-            handle_tcp_queue(tmp);
     }
+}
+
+static void thread2_cb(void *arg) {
+    ts_data_t *data;
+    for (;;) {
+        for (data = tcpHead->tcp.next; data; data = data->tcp.next) {
+            uint64_t nowTime = get_usec();
+            if (data->tcp.timeout != 0 && nowTime > data->tcp.timeout) {
+                if (data->type == TS_CONNECT || data->type == TS6_CONNECT)
+                    handle_tcp_ack(data, 0x00); /* ack syn */
+                else if (data->tcp.wBufLen > 0)
+                    tcp_write(data);
+                else if (data->tcp.wBufLen == 0)
+                    handle_tcp_ack(data, 0x02); /* ack fin */
+            }
+        }
+        usleep(100 * 1000); /* equal 100ms */
+    }
+}
+
+void ts_run(void (*ts_cb_tmp)(ts_data_t *data)) {
+    /* init tcp queue head */
+    tcpHead = ts_malloc(sizeof(ts_data_t));
+
+    /* convey function pointer */
+    ts_cb = ts_cb_tmp;
+
+    /* thread1 handle data form tun and callback */
+    /* thread2 handle tcp timer */
+    pthread_t thread1, thread2;
+    pthread_create(&thread1, NULL, (void *)&thread1_cb, NULL);
+    pthread_create(&thread2, NULL, (void *)&thread2_cb, NULL);
+    pthread_join(thread1, NULL);
+    pthread_join(thread1, NULL);
 }

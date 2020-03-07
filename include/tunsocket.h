@@ -63,13 +63,14 @@ typedef struct ts_data {
             uint16_t dport;
             char *rBuf;
             char *wBuf;
-            int rBufLen;
-            int wBufLen;
-            int rBufPointer;       /* ring buffer */
-            int wBufPointer;       /* ring buffer */
-            pthread_mutex_t rLock; /* thread safe */
-            pthread_mutex_t wLock; /* thread safe */
-            long long timeout;
+            uint32_t rBufLen;
+            uint32_t wBufLen;
+            uint32_t rBufPointer;    /* ring buffer */
+            uint32_t wBufPointer;    /* ring buffer */
+            pthread_mutex_t rLock;   /* thread safe */
+            pthread_mutex_t wLock;   /* thread safe */
+            pthread_mutex_t seqLock; /* thread safe */
+            u_int64_t timeout;
             uint32_t ack;
             uint32_t seq;
             uint32_t peerAck;

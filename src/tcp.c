@@ -6,8 +6,10 @@
 #define ACK_FIN_TIMEOUT (2 * 1000 * 1000)     /* us */
 #define ACK_PAYLOAD_TIMEOUT (2 * 1000 * 1000) /* us */
 
-static void handle_tcp_ack(ts_data_t *data, char flag);
+static ts_data_t *search_queue(uint8_t flag, char *buf);
 static void tcp_remove(ts_data_t *data);
+static void tcp_new(uint8_t flag, char *buf);
+static void ack_rst(uint8_t flag, char *buf);
 
 static inline void tcp_remove(ts_data_t *data) {
     data->tcp.last->tcp.next = data->tcp.next;
@@ -19,219 +21,67 @@ static inline void tcp_remove(ts_data_t *data) {
     ts_free(data);
 }
 
-int ts_tcp_read(ts_data_t *data, char *buf, int bufLen) {
-    int n = -1;
-    errno = EINVAL;
-
-    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
-        if (data->tcp.rBufLen > 0) {
-            pthread_mutex_lock(&data->tcp.rLock);
-
-            n = ring_copy_out(data->tcp.rBuf, tcpRMax, data->tcp.rBufPointer,
-                              data->tcp.rBufLen, buf, bufLen);
-            data->tcp.rBufLen -= n;
-            data->tcp.rBufPointer = (data->tcp.rBufPointer + n) % tcpRMax;
-
-            pthread_mutex_unlock(&data->tcp.rLock);
-        } else if (data->tcp.status == 0) {
-            errno = EAGAIN;
-        } else if (data->tcp.status & 0xe0) {
-            n = 0; /* closed by peer */
-            errno = 0;
-        } else if (data->tcp.status & 0x11) {
-            errno = EPIPE; /* rst recv or peer closed */
-        }
-    }
-
-    return n;
-}
-
-int ts_tcp_write(ts_data_t *data, char *buf, int bufLen) {
-    int n = -1;
-    errno = EINVAL;
-
-    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE) ||
-        (data->type == TS_WABLE) || (data->type == TS6_WABLE)) {
-        pthread_mutex_lock(&data->tcp.rLock);
-
-        n = ring_input(data->tcp.wBuf, tcpWMax, data->tcp.wBufPointer,
-                       &data->tcp.wBufLen, buf, bufLen);
-        if ((data->tcp.wBufLen <= n) && (data->tcp.wBufLen > 0))
-            tcp_write(data);
-        if (n < bufLen)
-            data->tcp.status |= 0x08; /* WABLE callback status */
-
-        pthread_mutex_unlock(&data->tcp.rLock);
-    }
-
-    return n;
-}
-
-void ts_tcp_close(ts_data_t *data) {
-    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
-        data->tcp.status |= 0x20;
-
-        if ((data->tcp.status & 0x80) && (data->tcp.wBufLen <= 0)) {
-            handle_tcp_ack(data, 0x02); /* ack fin */
-            data->tcp.status |= 0x40;
-        }
-    }
-}
-
-void ts_tcp_shutdown(ts_data_t *data) {
-    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
-        data->tcp.status |= 0x04;
-
-        if ((data->tcp.status & 0x80) && (data->tcp.wBufLen <= 0)) {
-            handle_tcp_ack(data, 0x02); /* ack fin */
-            data->tcp.status |= 0x40;
-        }
-    }
-}
-
-void handle_tcp(uint16_t flag, char *buf, int bufLen) {
+static ts_data_t *search_queue(uint8_t flag, char *buf) {
     int iphdrLen = (flag == 4) ? (buf[0] & 0x0f) * 4 : 40;
+    ts_data_t *data;
+    for (data = tcpHead->tcp.next; data; data = data->tcp.next) {
+        if (flag == 4) {
+            if ((data->tcp.sport != *(uint16_t *)&buf[iphdrLen] ||
+                 (memcmp(data->tcp.sip, &buf[12], 4))))
+                continue;
+        } else {
+            if (data->tcp.sport != *(uint16_t *)&buf[iphdrLen] ||
+                (memcmp(data->tcp.sip, &buf[8], 16)))
+                continue;
+        }
+        return data;
+    }
+    return NULL;
+}
+
+static void tcp_new(uint8_t flag, char *buf) {
+    int iphdrLen = (flag == 4) ? (buf[0] & 0x0f) * 4 : 40;
+    ts_data_t *data = ts_malloc(sizeof(ts_data_t));
+
+    if (flag == 4) {
+        data->type = TS_CONNECT;
+        memcpy(data->tcp.sip, &buf[12], 4);
+        memcpy(data->tcp.dip, &buf[16], 4);
+    } else {
+        data->type = TS6_CONNECT;
+        memcpy(data->tcp.sip, &buf[8], 16);
+        memcpy(data->tcp.dip, &buf[24], 16);
+    }
+    data->tcp.sport = *(uint16_t *)&buf[iphdrLen];
+    data->tcp.dport = *(uint16_t *)&buf[iphdrLen + 2];
+    data->tcp.rBuf = ts_malloc(tcpRMax);
+    data->tcp.wBuf = ts_malloc(tcpWMax);
+    data->tcp.rBufLen = 0;
+    data->tcp.wBufLen = 0;
+    data->tcp.rBufPointer = 0;
+    data->tcp.wBufPointer = 0;
+    data->tcp.mss = ntohs(*(uint16_t *)&buf[iphdrLen + 22]);
+    data->tcp.ack = ntohl(*(int *)&buf[iphdrLen + 4]) + 1;
+    data->tcp.status = 0x00;
+    data->tcp.next = NULL;
+    data->tcp.ptr = NULL;
+
+    pthread_mutex_init(&data->tcp.rLock, NULL);
+    pthread_mutex_init(&data->tcp.wLock, NULL);
+
     ts_data_t *tmp;
-    int tcpFlag = buf[iphdrLen + 13] & 0x3f;
+    for (tmp = tcpHead; tmp->tcp.next; tmp = tmp->tcp.next)
+        ;
+    tmp->tcp.next = data;
+    data->tcp.last = tmp;
 
-    /* search in tcp queue */
-    for (tmp = tcpHead->tcp.next; tmp; tmp = tmp->tcp.next) {
-        if (flag == 4) {
-            if ((tmp->tcp.sport != *(uint16_t *)&buf[iphdrLen]) ||
-                (0 != (memcmp(tmp->tcp.sip, &buf[12], 4))))
-                continue;
-        } else {
-            if ((tmp->tcp.sport != *(uint16_t *)&buf[iphdrLen]) ||
-                (0 != (memcmp(tmp->tcp.sip, &buf[8], 16))))
-                continue;
-        }
+    handle_tcp_ack(data, 0x00); /* ack syn */
 
-        int tcphdrLen = (*(uint8_t *)&buf[iphdrLen + 12] >> 4) * 4;
-        int payloadLen = bufLen - iphdrLen - tcphdrLen;
-        uint32_t peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
-        tmp->tcp.window = ntohs(*(uint16_t *)&buf[iphdrLen + 14]);
+    ts_cb(data);
+}
 
-        /* handle payload */
-        if (payloadLen > 0) {
-            uint32_t peerSeq = ntohl(*(int *)&buf[iphdrLen + 4]);
-            if (tmp->tcp.ack == peerSeq) {
-                if (!(tmp->tcp.status & 0x20)) /* ts_tcp_close, drop payload */
-                    ring_input(tmp->tcp.rBuf, tcpRMax, tmp->tcp.rBufPointer,
-                               &tmp->tcp.rBufLen, &buf[iphdrLen + tcphdrLen],
-                               payloadLen);
-                tmp->tcp.ack += payloadLen;
-            }
-            handle_tcp_ack(tmp, 0x01); /* ack */
-        }
-        /* Fast retransmission or update info */
-        if ((tmp->tcp.peerAck == peerAck) && (tmp->type != TS_CONNECT) &&
-            (tmp->type != TS6_CONNECT)) {
-            tmp->tcp.seq = tmp->tcp.peerAck;
-            tcp_write(tmp);
-        } else if (tmp->tcp.wBufLen > 0) {
-            uint32_t len = peerAck - tmp->tcp.peerAck;
-            tmp->tcp.wBufPointer = (tmp->tcp.wBufPointer + len) % tcpWMax;
-            tmp->tcp.wBufLen -= len;
-            if (tmp->tcp.wBufLen < 0)
-                tmp->tcp.wBufLen = 0;
-            tmp->tcp.peerAck = peerAck;
-            if (tmp->tcp.wBufLen <= 0)
-                tmp->tcp.timeout = -1;
-        } else if ((tmp->tcp.wBufLen <= 0) && (tmp->tcp.status & 0x40)) {
-            tmp->tcp.timeout = -1;
-        }
-        /* ack and ack psh*/
-        if ((tcpFlag == 0x10) || (tcpFlag == 0x18)) {
-            if (tmp->type == TS_CONNECT) {
-                tmp->tcp.peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
-                tmp->tcp.seq += 1;
-                tmp->type = TS_RABLE;
-                tmp->tcp.timeout = -1;
-            } else if (tmp->type == TS6_CONNECT) {
-                tmp->tcp.peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
-                tmp->tcp.seq += 1;
-                tmp->type = TS6_RABLE;
-                tmp->tcp.timeout = -1;
-            } else if (!(tmp->tcp.status & 0x40)) {
-                if (tmp->tcp.wBufLen > 0) {
-                    tcp_write(tmp);
-                } else if (tmp->tcp.status & 0x08) {
-                    tmp->type = (flag == 4) ? TS_WABLE : TS6_WABLE;
-                    tmp->tcp.status &= ~0x08;
-                    ts_cb(tmp);
-                    tmp->type = (flag == 4) ? TS_RABLE : TS6_RABLE;
-                } else if (tmp->tcp.status & 0x24) {
-                    handle_tcp_ack(tmp, 0x02); /* ack fin */
-                    tmp->tcp.status |= 0x40;
-                }
-            }
-            /* sent ack fin and recieve ack, should be deleted */
-            else if ((tmp->tcp.status & 0xc0) == 0xc0) {
-                tcp_remove(tmp);
-            }
-        }
-        /* ack fin */
-        else if (tcpFlag == 0x11) {
-            tmp->tcp.status |= 0x80;
-            tmp->tcp.ack += 1;
-            handle_tcp_ack(tmp, 0x01);  /* ack */
-            if (tmp->tcp.status & 0x40) /* ack fin sent already */
-                tcp_remove(tmp);
-        }
-        /* rst */
-        else if (tcpFlag & 0x04) {
-            tmp->tcp.status = 0x10;
-            ts_cb(tmp);
-            tcp_remove(tmp);
-        }
-        /* ignore other tcp flags  */
-
-        return;
-    }
-
-    /* syn and add to tcp queue */
-    if (tcpFlag == 0x02) {
-        ts_data_t *data = ts_malloc(sizeof(ts_data_t));
-
-        if (flag == 4) {
-            data->type = TS_CONNECT;
-            memcpy(data->tcp.sip, &buf[12], 4);
-            memcpy(data->tcp.dip, &buf[16], 4);
-        } else {
-            data->type = TS6_CONNECT;
-            memcpy(data->tcp.sip, &buf[8], 16);
-            memcpy(data->tcp.dip, &buf[24], 16);
-        }
-        data->tcp.sport = *(uint16_t *)&buf[iphdrLen];
-        data->tcp.dport = *(uint16_t *)&buf[iphdrLen + 2];
-        data->tcp.rBuf = ts_malloc(tcpRMax);
-        data->tcp.wBuf = ts_malloc(tcpWMax);
-        data->tcp.rBufLen = 0;
-        data->tcp.wBufLen = 0;
-        data->tcp.rBufPointer = 0;
-        data->tcp.wBufPointer = 0;
-        data->tcp.mss = ntohs(*(uint16_t *)&buf[iphdrLen + 22]);
-        data->tcp.ack = ntohl(*(int *)&buf[iphdrLen + 4]) + 1;
-        data->tcp.status = 0x00;
-        data->tcp.next = NULL;
-        data->tcp.ptr = NULL;
-
-        pthread_mutex_init(&data->tcp.rLock, NULL);
-        pthread_mutex_init(&data->tcp.wLock, NULL);
-
-        for (tmp = tcpHead; tmp->tcp.next; tmp = tmp->tcp.next)
-            ;
-        tmp->tcp.next = data;
-        data->tcp.last = tmp;
-
-        handle_tcp_ack(data, 0x00); /* ack syn */
-
-        ts_cb(data);
-
-        return;
-    }
-
-    /* other tcp data and ack rst */
+static void ack_rst(uint8_t flag, char *buf) {
+    int iphdrLen = (flag == 4) ? (buf[0] & 0x0f) * 4 : 40;
     int tcphdrLen = 20;
     int bufTmpLen = iphdrLen + tcphdrLen;
     char bufTmp[bufTmpLen];
@@ -253,7 +103,7 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
     } else {
         struct ip6_hdr *ip6 = (struct ip6_hdr *)&bufTmp[0];
         ip6->ip6_flow = htonl(6 << 28);
-        ip6->ip6_plen = htons(20 + bufLen);
+        ip6->ip6_plen = htons(20);
         ip6->ip6_nxt = 6;
         ip6->ip6_hlim = 64;
         memcpy(&ip6->ip6_src, &buf[24], 16);
@@ -295,45 +145,188 @@ void handle_tcp(uint16_t flag, char *buf, int bufLen) {
     SILENT(write(tunFd, bufTmp, bufTmpLen));
 }
 
-void handle_tcp_queue(ts_data_t *data) {
-    long long nowTime = get_usec();
-    if ((data->tcp.timeout != -1) && (nowTime > data->tcp.timeout)) {
-        if ((data->type == TS_CONNECT) || (data->type == TS6_CONNECT))
-            handle_tcp_ack(data, 0x00); /* ack syn */
-        else if (data->tcp.wBufLen == 0)
-            handle_tcp_ack(data, 0x02); /* ack fin */
-        else if (data->tcp.wBufLen > 0)
-            tcp_write(data);
-    }
-    if (!(data->tcp.status & 0x02)) {
-        if ((!(data->tcp.status & 0x20)) && (data->tcp.rBufLen > 0))
-            ts_cb(data);
-        if ((data->tcp.rBufLen <= 0) && (data->tcp.status & 0x80) &&
-            (!(data->tcp.status & 0x01))) {
-            ts_cb(data);
-            data->tcp.status |= 0x01;
+int ts_tcp_read(ts_data_t *data, char *buf, int bufLen) {
+    pthread_mutex_lock(&data->tcp.rLock);
+    int n = -1;
+    errno = EINVAL;
+
+    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
+        if (data->tcp.rBufLen > 0) {
+            n = ring_copy_out(data->tcp.rBuf, tcpRMax, data->tcp.rBufPointer,
+                              data->tcp.rBufLen, buf, bufLen);
+            data->tcp.rBufLen -= n;
+            data->tcp.rBufPointer = (data->tcp.rBufPointer + n) % tcpRMax;
+        } else if (data->tcp.status == 0) {
+            errno = EAGAIN;
+        } else if (data->tcp.status & 0xe0) {
+            n = 0; /* closed by peer */
+            errno = 0;
+        } else if (data->tcp.status & 0x11) {
+            errno = EPIPE; /* rst recv or peer closed */
         }
+    }
+
+    pthread_mutex_unlock(&data->tcp.rLock);
+    return n;
+}
+
+int ts_tcp_write(ts_data_t *data, char *buf, int bufLen) {
+    if (bufLen == 0) {
+        errno = 0;
+        return 0;
+    }
+
+    pthread_mutex_lock(&data->tcp.rLock);
+    int n = -1;
+    errno = EINVAL;
+
+    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE) ||
+        (data->type == TS_WABLE) || (data->type == TS6_WABLE)) {
+        n = ring_input(data->tcp.wBuf, tcpWMax, data->tcp.wBufPointer,
+                       &data->tcp.wBufLen, buf, bufLen);
+        if (data->tcp.wBufLen == n && data->tcp.wBufLen > 0)
+            tcp_write(data);
+        if (n < bufLen)
+            data->tcp.status |= 0x08; /* WABLE callback status */
+    }
+
+    pthread_mutex_unlock(&data->tcp.rLock);
+    return n;
+}
+
+void ts_tcp_close(ts_data_t *data) {
+    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
+        data->tcp.status |= 0x20;
+
+        if ((data->tcp.status & 0x80) && (data->tcp.wBufLen == 0))
+            handle_tcp_ack(data, 0x02); /* ack fin */
     }
 }
 
-void tcp_write(ts_data_t *data) {
-    if (data->tcp.wBufLen <= 0)
+void ts_tcp_shutdown(ts_data_t *data) {
+    if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
+        data->tcp.status |= 0x04;
+
+        if ((data->tcp.status & 0x80) && (data->tcp.wBufLen == 0))
+            handle_tcp_ack(data, 0x02); /* ack fin */
+    }
+}
+
+void handle_tcp(uint8_t flag, char *buf, int bufLen) {
+    int iphdrLen = (flag == 4) ? (buf[0] & 0x0f) * 4 : 40;
+    int tcpFlag = buf[iphdrLen + 13] & 0x3f;
+
+    ts_data_t *data = search_queue(flag, buf);
+    if (!data) {
+        if (tcpFlag == 0x02)
+            tcp_new(flag, buf);
+        else
+            ack_rst(flag, buf);
         return;
+    }
+
+    int tcphdrLen = (*(uint8_t *)&buf[iphdrLen + 12] >> 4) * 4;
+    int payloadLen = bufLen - iphdrLen - tcphdrLen;
+    uint32_t peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
+    data->tcp.window = ntohs(*(uint16_t *)&buf[iphdrLen + 14]);
+
+    /* handle payload */
+    if (payloadLen > 0) {
+        uint32_t peerSeq = ntohl(*(int *)&buf[iphdrLen + 4]);
+        if (data->tcp.ack == peerSeq) {
+            if (!(data->tcp.status & 0x20)) { /* ts_tcp_close, drop payload */
+                ring_input(data->tcp.rBuf, tcpRMax, data->tcp.rBufPointer,
+                           &data->tcp.rBufLen, &buf[iphdrLen + tcphdrLen],
+                           payloadLen);
+                ts_cb(data);
+            }
+            data->tcp.ack += payloadLen;
+        }
+        handle_tcp_ack(data, 0x01); /* ack */
+    }
+    /* retransmission or update info */
+    if (data->tcp.wBufLen > 0) {
+        if (data->tcp.peerAck == peerAck) {
+            data->tcp.seq = data->tcp.peerAck;
+            tcp_write(data);
+        } else if (data->tcp.peerAck < peerAck && peerAck <= data->tcp.seq) {
+            uint32_t len = peerAck - data->tcp.peerAck;
+            data->tcp.wBufPointer = (data->tcp.wBufPointer + len) % tcpWMax;
+            data->tcp.wBufLen -= len;
+            data->tcp.peerAck = peerAck;
+            if (data->tcp.wBufLen > 0)
+                tcp_write(data);
+            else if (data->tcp.wBufLen == 0)
+                data->tcp.timeout = 0;
+        }
+    } else if (data->tcp.wBufLen == 0 && data->tcp.status & 0x40) {
+        data->tcp.timeout = 0;
+    }
+    /* ack */
+    if (tcpFlag & 0x10) {
+        if (data->type == TS_CONNECT) {
+            data->tcp.peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
+            data->tcp.seq += 1;
+            data->type = TS_RABLE;
+            data->tcp.timeout = 0;
+        } else if (data->type == TS6_CONNECT) {
+            data->tcp.peerAck = ntohl(*(int *)&buf[iphdrLen + 8]);
+            data->tcp.seq += 1;
+            data->type = TS6_RABLE;
+            data->tcp.timeout = 0;
+        } else if (!(data->tcp.status & 0x40)) {
+            if (data->tcp.status & 0x08) {
+                data->type = (flag == 4) ? TS_WABLE : TS6_WABLE;
+                data->tcp.status &= ~0x08;
+                ts_cb(data);
+                data->type = (flag == 4) ? TS_RABLE : TS6_RABLE;
+            } else if (data->tcp.status & 0x24 && data->tcp.wBufLen == 0) {
+                handle_tcp_ack(data, 0x02); /* ack fin */
+            }
+        }
+        /* sent ack fin and recieve ack, should be deleted */
+        else if ((data->tcp.status & 0xc0) == 0xc0) {
+            tcp_remove(data);
+        }
+    }
+    /* ack fin */
+    else if (tcpFlag & 0x01) {
+        data->tcp.status |= 0x80;
+        data->tcp.ack += 1;
+        handle_tcp_ack(data, 0x01);  /* ack */
+        if (data->tcp.status & 0x40) /* ack fin sent already */
+            tcp_remove(data);
+    }
+    /* rst */
+    if (tcpFlag & 0x04) {
+        data->tcp.status = 0x10;
+        ts_cb(data);
+        tcp_remove(data);
+    }
+    /* ignore other tcp flags  */
+}
+
+void tcp_write(ts_data_t *data) {
+    pthread_mutex_lock(&data->tcp.seqLock);
+
+    if (data->tcp.wBufLen == 0)
+        goto out;
 
     int detection = (data->tcp.window == 0) ? 1 : 0;
     uint16_t peerWindowLeft =
         data->tcp.peerAck + data->tcp.window - data->tcp.seq;
-    if (!(peerWindowLeft))
-        return; /* zero make no sense */
-    int sendLen = (peerWindowLeft < data->tcp.wBufLen) ? peerWindowLeft
-                                                       : data->tcp.wBufLen;
-    int sendTimes = sendLen / data->tcp.mss + 1;
+    uint32_t sendLeft = data->tcp.wBufLen + data->tcp.peerAck - data->tcp.seq;
+    if (peerWindowLeft == 0 || sendLeft == 0)
+        goto out; /* zero make no sense */
+    int sendLen = (peerWindowLeft < sendLeft) ? peerWindowLeft : sendLeft;
+    int sendTimes = sendLen / data->tcp.mss;
+    sendTimes += (detection || sendLen % data->tcp.mss) ? 1 : 0;
     printf("sendLen %d peerAck %d window %d wBufLen %d  seq %d \n", sendLen,
            data->tcp.peerAck, data->tcp.window, data->tcp.wBufLen,
            data->tcp.seq);
-    uint16_t window = ((tcpWMax - data->tcp.wBufLen) > 65535)
+    uint16_t window = ((tcpRMax - data->tcp.rBufLen) > 65535)
                           ? htons(65535)
-                          : htons(tcpWMax - data->tcp.wBufLen);
+                          : htons(tcpRMax - data->tcp.rBufLen);
     int p = data->tcp.wBufPointer;
     for (int i = 0; i < sendTimes; i++) {
         int iphdrLen = (data->type & 0x0f) ? 20 : 40;
@@ -419,9 +412,15 @@ void tcp_write(ts_data_t *data) {
     }
 
     data->tcp.timeout = get_usec() + ACK_PAYLOAD_TIMEOUT; /* update timer */
+    goto out;
+
+out:
+    pthread_mutex_unlock(&data->tcp.seqLock);
 }
 
-static void handle_tcp_ack(ts_data_t *data, char flag) {
+void handle_tcp_ack(ts_data_t *data, char flag) {
+    pthread_mutex_lock(&data->tcp.seqLock);
+
     int iphdrLen = (data->type & 0x0f) ? 20 : 40;
     int tcphdrLen = (0x00 == flag) ? 24 : 20;
     int bufTmpLen = iphdrLen + tcphdrLen;
@@ -466,7 +465,10 @@ static void handle_tcp_ack(ts_data_t *data, char flag) {
     } else if (flag == 0x02) {
         ((char *)tcp)[13] = 0x11; /* ack fin */
         data->tcp.timeout = get_usec() + ACK_FIN_TIMEOUT;
-        data->tcp.seq += 1;
+        if (!(data->tcp.status & 0x40)) {
+            data->tcp.status |= 0x40;
+            data->tcp.seq += 1;
+        }
     }
     if ((tcpRMax - data->tcp.rBufLen) > 65535)
         tcp->window = htons(65535);
@@ -501,4 +503,5 @@ static void handle_tcp_ack(ts_data_t *data, char flag) {
     }
 
     SILENT(write(tunFd, bufTmp, bufTmpLen));
+    pthread_mutex_unlock(&data->tcp.seqLock);
 }

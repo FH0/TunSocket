@@ -103,7 +103,7 @@ void tcp_cb(ts_data_t *data) {
     } else if (data->type == TS_RABLE) {
         epoll_ptr_t *pData = (epoll_ptr_t *)data->tcp.ptr;
 
-        if (data->tcp.status & 0x11) {
+        if (data->tcp.status & 0x10) {
             pinfo("error", data->tcp.sip, data->tcp.dip);
             epoll_ctl(epollFd, EPOLL_CTL_DEL, pData->fd,
                       (struct epoll_event *)NULL);
@@ -128,16 +128,15 @@ void tcp_cb(ts_data_t *data) {
             }
             pinfo("payload", data->tcp.sip, data->tcp.dip);
             int sendLeft = socket_send_left(pData->fd);
-            if (sendLeft > 0) {
-                if (data->tcp.rBufLen <= sendLeft) {
-                    char tmp[data->tcp.rBufLen];
-                    ts_tcp_read(data, tmp, data->tcp.rBufLen);
-                    SILENT(write(pData->fd, tmp, data->tcp.rBufLen));
-                } else {
-                    char tmp[sendLeft + 1];
-                    ts_tcp_read(data, tmp, sendLeft);
-                    SILENT(write(pData->fd, tmp, sendLeft + 1));
-                }
+            int n = data->tcp.rBufLen;
+            if (sendLeft <= n) {
+                char tmp[sendLeft];
+                ts_tcp_read(data, tmp, sendLeft);
+                SILENT(write(pData->fd, tmp, sendLeft));
+            } else {
+                char tmp[n + 1];
+                ts_tcp_read(data, tmp, n);
+                SILENT(write(pData->fd, tmp, n + 1));
             }
         }
     } else if (data->type == TS_WABLE) {
@@ -149,14 +148,14 @@ void tcp_cb(ts_data_t *data) {
         pinfo("payload", data->tcp.dip, data->tcp.sip);
 
         int wBufLeft = tcpWMax - data->tcp.wBufLen;
-        int n = (wBufLeft > recvUsed)
-                    ? recvUsed
-                    : wBufLeft; /* how much data need to handle */
-        char tmp[n];
-        SILENT(read(pData->fd, tmp, n));
-        ts_tcp_write(data, tmp, n);
-        if (wBufLeft <= recvUsed) {
-            ts_tcp_write(data, "1", 1); /* make it EAGAIN */
+        if (recvUsed <= wBufLeft) {
+            char tmp[recvUsed];
+            SILENT(read(pData->fd, tmp, recvUsed));
+            ts_tcp_write(data, tmp, recvUsed);
+        } else {
+            char tmp[wBufLeft + 1];
+            SILENT(read(pData->fd, tmp, wBufLeft));
+            ts_tcp_write(data, tmp, wBufLeft + 1);
         }
     }
 }
@@ -210,30 +209,30 @@ void thread2_cb(void *arg) {
 
                     int recvUsed = socket_recv_used(pData->fd);
                     int wBufLeft = tcpWMax - data->tcp.wBufLen;
-                    int n = (wBufLeft > recvUsed)
-                                ? recvUsed
-                                : wBufLeft; /* how much data need to
-                                               handle */
-                    char tmp[n];
-                    SILENT(read(pData->fd, tmp, n));
-
-                    ts_tcp_write(data, tmp, n);
-                    if (wBufLeft <= recvUsed)
-                        ts_tcp_write(data, "1", 1); /* make it EAGAIN */
+                    if (recvUsed <= wBufLeft) {
+                        char tmp[recvUsed];
+                        SILENT(read(pData->fd, tmp, recvUsed));
+                        ts_tcp_write(data, tmp, recvUsed);
+                    } else {
+                        char tmp[wBufLeft + 1];
+                        SILENT(read(pData->fd, tmp, wBufLeft));
+                        ts_tcp_write(data, tmp, wBufLeft + 1);
+                    }
                 }
             } else if (events[i].events & EPOLLOUT) {
                 int sendLeft = socket_send_left(pData->fd);
                 if (data->tcp.rBufLen > 0) {
                     pinfo("payload", data->tcp.sip, data->tcp.dip);
 
-                    int n = (sendLeft > data->tcp.rBufLen)
-                                ? data->tcp.rBufLen
-                                : sendLeft; /* how much data need to handle */
-                    char tmp[n];
-                    ts_tcp_read(data, tmp, n);
-                    SILENT(write(pData->fd, tmp, n));
-                    if (sendLeft <= data->tcp.rBufLen) { /* make it EAGAIN */
-                        SILENT(write(pData->fd, "1", 1));
+                    int n = data->tcp.rBufLen;
+                    if (sendLeft <= n) {
+                        char tmp[sendLeft];
+                        ts_tcp_read(data, tmp, sendLeft);
+                        SILENT(write(pData->fd, tmp, sendLeft));
+                    } else {
+                        char tmp[n + 1];
+                        ts_tcp_read(data, tmp, n);
+                        SILENT(write(pData->fd, tmp, n + 1));
                     }
                 }
             } else {

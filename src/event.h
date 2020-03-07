@@ -3,12 +3,11 @@
 
 #include <tunsocket.h>
 
-extern int tcpRMax;
-extern int tcpWMax;
+extern uint32_t tcpRMax;
+extern uint32_t tcpWMax;
 extern ts_data_t *tcpHead;
 extern int tunFd;
-extern int tunMtu;
-extern int tcpET;
+extern uint32_t tunMtu;
 
 extern void (*ts_cb)(ts_data_t *data);
 

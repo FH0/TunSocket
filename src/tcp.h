@@ -4,8 +4,8 @@
 #include <tunsocket.h>
 
 void tcp_write(ts_data_t *data);
-void handle_tcp(uint16_t flag, char *buf, int bufLen);
-void handle_tcp_queue(ts_data_t *data);
+void handle_tcp(uint8_t flag, char *buf, int bufLen);
+void handle_tcp_ack(ts_data_t *data, char flag);
 
 /*
  * uint8_t recv_fin:1
