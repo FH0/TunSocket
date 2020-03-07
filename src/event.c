@@ -25,25 +25,25 @@ void ts_set(int flag, ...) {
     va_list ap;
 
     va_start(ap, flag);
-    if (flag == TS_MTU) {
+    if (flag == TS_MTU)
         tunMtu = va_arg(ap, uint32_t);
-    } else if (flag == TS_UNIX_PATH) {
+    else if (flag == TS_UNIX_PATH)
         unixPath = va_arg(ap, char *);
-    } else if (flag == TS_TUN_PATH) {
+    else if (flag == TS_TUN_PATH)
         tunPath = va_arg(ap, char *);
-    } else if (flag == TS_TUN_NAME) {
+    else if (flag == TS_TUN_NAME)
         tunName = va_arg(ap, char *);
-    } else if (flag == TS_TCP_RMAX) {
+    else if (flag == TS_TCP_RMAX)
         tcpRMax = va_arg(ap, uint32_t);
-    } else if (flag == TS_TCP_WMAX) {
+    else if (flag == TS_TCP_WMAX)
         tcpWMax = va_arg(ap, uint32_t);
-    } else if (flag == TS_ADDR) {
+    else if (flag == TS_ADDR)
         tunAddr = va_arg(ap, char *);
-    } else if (flag == TS_ADDR6) {
+    else if (flag == TS_ADDR6)
         tunAddr6 = va_arg(ap, char *);
-    } else {
+    else
         ASSERT(0 && "flag not support");
-    }
+
     va_end(ap);
 }
 

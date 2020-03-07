@@ -111,7 +111,7 @@ void tcp_cb(ts_data_t *data) {
                       (struct epoll_event *)NULL);
             close(pData->fd);
             ts_tcp_close(data);
-            ts_free(data->tcp.ptr);
+            ts_free(pData);
         } else if (data->tcp.rBufLen == 0) {
             if ((tcp_status(pData->fd)) == TCP_CLOSE_WAIT) {
                 pinfo("close", data->tcp.dip, data->tcp.sip);
@@ -179,9 +179,6 @@ void thread2_cb(void *arg) {
             epoll_ptr_t *pData = (epoll_ptr_t *)events[i].data.ptr;
             ts_data_t *data = pData->data;
             if (events[i].events & EPOLLIN) {
-                if (data == NULL)
-                    puts("NULL");
-
                 int recvUsed = socket_recv_used(pData->fd);
                 if (recvUsed == 0) {
                     struct tcp_info info;
@@ -229,7 +226,6 @@ void thread2_cb(void *arg) {
                     pinfo("payload", data->tcp.sip, data->tcp.dip);
 
                     int n = data->tcp.rBufLen;
-                    printf("rBufLen %d\n", data->tcp.rBufLen);
                     if (n <= sendLeft) {
                         char tmp[n];
                         ts_tcp_read(data, tmp, n);

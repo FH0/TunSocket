@@ -197,7 +197,11 @@ void ts_tcp_close(ts_data_t *data) {
     if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
         data->tcp.status |= 0x20;
 
-        if ((data->tcp.status & 0x80) && (data->tcp.wBufLen == 0))
+        printf("%x\n", data->tcp.status);
+        if ((data->tcp.status & 0xb0) == 0xb0 || data->tcp.status & 0x10)
+            tcp_remove(data);
+        else if (data->tcp.status & 0x80 && data->tcp.wBufLen == 0 &&
+                 !(data->tcp.status & 0x40))
             handle_tcp_ack(data, 0x02); /* ack fin */
     }
 }
@@ -206,7 +210,8 @@ void ts_tcp_shutdown(ts_data_t *data) {
     if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
         data->tcp.status |= 0x04;
 
-        if ((data->tcp.status & 0x80) && (data->tcp.wBufLen == 0))
+        if (data->tcp.status & 0x80 && data->tcp.wBufLen == 0 &&
+            !(data->tcp.status & 0x40))
             handle_tcp_ack(data, 0x02); /* ack fin */
     }
 }
@@ -219,7 +224,7 @@ void handle_tcp(uint8_t flag, char *buf, int bufLen) {
     if (!data) {
         if (tcpFlag == 0x02)
             tcp_new(flag, buf);
-        else
+        else if (!(tcpFlag & 0x04))
             ack_rst(flag, buf);
         return;
     }
@@ -278,7 +283,7 @@ void handle_tcp(uint8_t flag, char *buf, int bufLen) {
             data->type = TS6_RABLE;
             data->tcp.timeout = 0;
         } else if (!(data->tcp.status & 0x40)) {
-            if (data->tcp.status & 0x08) {
+            if (data->tcp.status & 0x08 && !(data->tcp.status & 0x20)) {
                 data->type = (flag == 4) ? TS_WABLE : TS6_WABLE;
                 data->tcp.status &= ~0x08;
                 ts_cb(data);
@@ -296,8 +301,8 @@ void handle_tcp(uint8_t flag, char *buf, int bufLen) {
     if (tcpFlag & 0x01) {
         data->tcp.status |= 0x80;
         data->tcp.ack += 1;
-        handle_tcp_ack(data, 0x01);  /* ack */
-        if (data->tcp.status & 0x40) /* ack fin sent already */
+        handle_tcp_ack(data, 0x01); /* ack */
+        if (data->tcp.status & 0x20)
             tcp_remove(data);
         else if (data->tcp.rBufLen == 0)
             ts_cb(data);
@@ -306,7 +311,6 @@ void handle_tcp(uint8_t flag, char *buf, int bufLen) {
     if (tcpFlag & 0x04) {
         data->tcp.status = 0x10;
         ts_cb(data);
-        tcp_remove(data);
     }
     /* ignore other tcp flags  */
 }
