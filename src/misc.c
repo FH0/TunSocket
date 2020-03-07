@@ -47,8 +47,9 @@ int ring_copy_out(char *ringBuf, uint32_t ringSize, uint32_t p, uint32_t len,
     return outLen;
 }
 
-inline void *ts_malloc(int len) {
-    void *ptr = calloc(len, 1);
+void *ts_malloc(int len) {
+    // void *ptr = calloc(len, 1);
+    void *ptr = malloc(len);
     ASSERT(ptr != NULL);
     return (void *)ptr;
 }

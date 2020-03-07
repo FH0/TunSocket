@@ -197,7 +197,6 @@ void ts_tcp_close(ts_data_t *data) {
     if ((data->type == TS_RABLE) || (data->type == TS6_RABLE)) {
         data->tcp.status |= 0x20;
 
-        printf("%x\n", data->tcp.status);
         if ((data->tcp.status & 0xb0) == 0xb0 || data->tcp.status & 0x10)
             tcp_remove(data);
         else if (data->tcp.status & 0x80 && data->tcp.wBufLen == 0 &&
@@ -320,7 +319,7 @@ void tcp_write(ts_data_t *data) {
 
     if (data->tcp.wBufLen == 0)
         goto out;
-
+/* 25c978dae2518c3da9beec8aa9d2f3da */
     int detection = (data->tcp.window == 0) ? 1 : 0;
     uint16_t peerWindowLeft =
         data->tcp.peerAck + data->tcp.window - data->tcp.seq;
@@ -336,7 +335,7 @@ void tcp_write(ts_data_t *data) {
     uint16_t window = ((tcpRMax - data->tcp.rBufLen) > 65535)
                           ? htons(65535)
                           : htons(tcpRMax - data->tcp.rBufLen);
-    int p = data->tcp.wBufPointer;
+    int p = data->tcp.wBufPointer + data->tcp.seq - data->tcp.peerAck;
     for (int i = 0; i < sendTimes; i++) {
         int iphdrLen = (data->type & 0x0f) ? 20 : 40;
         int tcphdrLen = 20;
